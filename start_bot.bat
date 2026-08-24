@@ -1,100 +1,87 @@
 @echo off
-chcp 65001 > nul
+setlocal
+
 title AutoTrans Bot
 
-echo.
-echo ╔══════════════════════════════════════╗
-echo ║      AutoTrans Bot を起動中...        ║
-echo ╚══════════════════════════════════════╝
+echo ========================================
+echo   AutoTrans Bot Starting...
+echo ========================================
 echo.
 
-:: ─────────────────────────────────────────────────────────────
-:: スクリプトのディレクトリに移動
-:: ─────────────────────────────────────────────────────────────
-cd /d "%~dp0"
+:: Determine install directory
+set "BOT_DIR=%~dp0"
+if not exist "%BOT_DIR%venv\Scripts\activate.bat" (
+    set "BOT_DIR=%USERPROFILE%\AutoTrans\"
+)
 
-:: ─────────────────────────────────────────────────────────────
-:: 仮想環境の存在確認
-:: ─────────────────────────────────────────────────────────────
-if not exist "venv\Scripts\activate.bat" (
-    echo  [エラー] 仮想環境が見つかりません。
-    echo  先に run_setup.bat を実行してセットアップを完了してください。
+:: Check venv exists
+if not exist "%BOT_DIR%venv\Scripts\activate.bat" (
+    echo [ERROR] Virtual environment not found.
+    echo Please run run_setup.bat first.
     echo.
     pause
     exit /b 1
 )
 
-:: ─────────────────────────────────────────────────────────────
-:: .envファイルの存在確認
-:: ─────────────────────────────────────────────────────────────
-if not exist ".env" (
-    echo  [エラー] .env ファイルが見つかりません。
-    echo  先に run_setup.bat を実行してDiscord Botの設定を行ってください。
+:: Check .env exists
+if not exist "%BOT_DIR%.env" (
+    echo [ERROR] .env file not found.
+    echo Please run run_setup.bat first.
     echo.
     pause
     exit /b 1
 )
 
-:: ─────────────────────────────────────────────────────────────
-:: Ollamaサービスの起動確認
-:: ─────────────────────────────────────────────────────────────
-echo  [確認] Ollama サービスを確認しています...
-ollama list > nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo  [起動] Ollama サービスを起動しています...
-    start /B ollama serve > nul 2>&1
-    echo  [待機] Ollama の起動を待っています (3秒)...
-    timeout /t 3 /nobreak > nul
-    :: 再確認
-    ollama list > nul 2>&1
-    if %ERRORLEVEL% NEQ 0 (
-        echo  [警告] Ollama サービスの起動を確認できませんでした。
-        echo         翻訳機能が動作しない可能性があります。
+:: Check and start Ollama service
+echo [INFO] Checking Ollama service...
+ollama list >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [INFO] Starting Ollama service...
+    start /B ollama serve >nul 2>&1
+    echo [INFO] Waiting for Ollama to start (5 seconds)...
+    timeout /t 5 /nobreak >nul
+    ollama list >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [WARN] Ollama service could not be confirmed.
+        echo        Translation features may not work.
         echo.
     ) else (
-        echo  [完了] Ollama サービスが起動しました。
+        echo [INFO] Ollama service started successfully.
     )
 ) else (
-    echo  [完了] Ollama サービスは起動済みです。
+    echo [INFO] Ollama service is already running.
 )
 
 echo.
 
-:: ─────────────────────────────────────────────────────────────
-:: 仮想環境の有効化
-:: ─────────────────────────────────────────────────────────────
-echo  [起動] 仮想環境を有効化しています...
-call venv\Scripts\activate.bat
-
-:: ─────────────────────────────────────────────────────────────
-:: bot.pyの存在確認
-:: ─────────────────────────────────────────────────────────────
-if not exist "bot.py" (
-    echo  [エラー] bot.py が見つかりません。
-    echo  AutoTrans のファイルが正しく配置されているか確認してください。
+:: Check bot.py exists
+if not exist "%BOT_DIR%bot.py" (
+    echo [ERROR] bot.py not found.
+    echo Please ensure AutoTrans files are correctly placed.
     echo.
     pause
     exit /b 1
 )
 
-:: ─────────────────────────────────────────────────────────────
-:: Bot起動
-:: ─────────────────────────────────────────────────────────────
-echo  [起動] AutoTrans Bot を起動しています...
+:: Activate virtual environment
+echo [INFO] Activating virtual environment...
+call "%BOT_DIR%venv\Scripts\activate.bat"
+
+:: Start bot
+echo [INFO] Starting AutoTrans Bot...
 echo.
-echo ─────────────────────────────────────────────────────
-echo  Bot が起動しました。停止するには Ctrl+C を押してください。
-echo ─────────────────────────────────────────────────────
+echo ----------------------------------------
+echo   Bot is running. Press Ctrl+C to stop.
+echo ----------------------------------------
 echo.
 
+cd /d "%BOT_DIR%"
 python bot.py
 
-:: ─────────────────────────────────────────────────────────────
-:: 終了処理
-:: ─────────────────────────────────────────────────────────────
 echo.
-echo ─────────────────────────────────────────────────────
-echo  Bot を停止しました。
-echo ─────────────────────────────────────────────────────
+echo ----------------------------------------
+echo   Bot stopped.
+echo ----------------------------------------
 echo.
 pause
+endlocal

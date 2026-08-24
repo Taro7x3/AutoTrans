@@ -24,7 +24,7 @@ $RepoUrl            = "https://github.com/Taro7x3/AutoTrans"
 $InstallDir         = "$env:USERPROFILE\AutoTrans"
 $tempLogFile        = "$env:TEMP\AutoTrans_setup_log.txt"
 $LogFile            = Join-Path $InstallDir "setup_log.txt"
-$TotalSteps         = 12
+$TotalSteps         = 13
 $script:CurrentStep = 0
 $script:ErrorCount  = 0
 
@@ -807,7 +807,90 @@ if ($doCreateEnv) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ11: デスクトップショートカットの作成
+# ステップ11: Discord Bot をサーバーに追加
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Discord Bot をサーバーに追加"
+
+if ($doCreateEnv -and $token -ne "") {
+    try {
+        Write-Log "Discord Bot Application ID を取得しています..."
+
+        $appId = $null
+
+        try {
+            $headers = @{
+                "Authorization" = "Bot $token"
+                "Content-Type"  = "application/json"
+            }
+            $response = Invoke-RestMethod -Uri "https://discord.com/api/v10/users/@me" `
+                -Headers $headers -Method Get -ErrorAction Stop
+            $appId   = $response.id
+            $botName = $response.username
+            Write-Done "Bot名: $botName (ID: $appId)"
+        } catch {
+            Write-Host "  [警告] Bot情報の自動取得に失敗しました: $_" -ForegroundColor Yellow
+            Write-Log "[警告] Bot情報の自動取得に失敗しました: $_"
+            Write-Host ""
+            Write-Host "  Discord Developer Portal (https://discord.com/developers/applications)" -ForegroundColor Cyan
+            Write-Host "  でアプリを選択し、「General Information」の「APPLICATION ID」をコピーしてください。" -ForegroundColor Cyan
+            Write-Host ""
+            $appId = Read-Host "  Application ID を入力してください（スキップする場合はEnter）"
+        }
+
+        if ($appId) {
+            # 必要な権限のビットフラグ
+            # Send Messages(2048) + Embed Links(16384) + Read Message History(65536)
+            # + Connect(1048576) + Speak(2097152) + Use Voice Activity(33554432)
+            $permissions = 2048 + 16384 + 65536 + 1048576 + 2097152 + 33554432
+            # = 36784128
+
+            # OAuth2招待URL生成
+            $inviteUrl = "https://discord.com/oauth2/authorize?client_id=$appId&scope=bot+applications.commands&permissions=$permissions"
+
+            Write-Host ""
+            Write-Host "  ============================================" -ForegroundColor Cyan
+            Write-Host "    Discord Bot をサーバーに追加します" -ForegroundColor Cyan
+            Write-Host "  ============================================" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  ブラウザが自動的に開きます。" -ForegroundColor White
+            Write-Host "  以下の手順でBotをサーバーに追加してください：" -ForegroundColor White
+            Write-Host ""
+            Write-Host "    1. ブラウザで開いたページで、追加したいサーバーを選択" -ForegroundColor Yellow
+            Write-Host "    2. 「はい」をクリック" -ForegroundColor Yellow
+            Write-Host "    3. 「認証」をクリック" -ForegroundColor Yellow
+            Write-Host "    4. 「私はロボットではありません」にチェックを入れて完了" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "    ※ サーバーの「管理者」権限が必要です" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "  招待URL: $inviteUrl" -ForegroundColor DarkGray
+            Write-Host ""
+
+            # ブラウザで招待URLを開く
+            Start-Process $inviteUrl
+
+            Write-Host "  ブラウザでBotの追加が完了したら、Enterキーを押して続行してください..." -ForegroundColor Green
+            Read-Host | Out-Null
+
+            Write-Done "Bot招待URLをブラウザで開きました"
+        } else {
+            Write-Host "  [スキップ] Application IDが入力されなかったためスキップします" -ForegroundColor Cyan
+            Write-Log "[スキップ] Application IDが入力されなかったためスキップします"
+            Write-Host "  後で以下のURLにアクセスしてBotをサーバーに追加してください：" -ForegroundColor Yellow
+            Write-Host "  https://discord.com/developers/applications" -ForegroundColor Cyan
+        }
+    } catch {
+        Write-Err "Bot追加ステップでエラーが発生しました: $_"
+        Write-Log "[エラー] Bot追加ステップでエラーが発生しました: $_"
+    }
+} else {
+    Write-Host "  [スキップ] .env設定をスキップしたため、このステップもスキップします。" -ForegroundColor Cyan
+    Write-Log "[スキップ] .env設定スキップのためBot追加ステップをスキップ。"
+    Write-Host "  後で以下のURLにアクセスしてBotをサーバーに追加してください：" -ForegroundColor Yellow
+    Write-Host "  https://discord.com/developers/applications" -ForegroundColor Cyan
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ12: デスクトップショートカットの作成
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "デスクトップショートカットの作成"
 
@@ -840,7 +923,7 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ12: 完了メッセージ
+# ステップ13: 完了メッセージ
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "セットアップ完了"
 
