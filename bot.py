@@ -9,6 +9,14 @@ py-cord[voice] + Silero VAD + faster-whisper + Ollama (qwen2.5:7b-instruct) を�
   2. TranslationWorker: Queueからチャンクを取り出し → faster-whisper(STT) → Ollama(翻訳) → Discord送信
 """
 
+# ─────────────────────────────────────────────
+# Pycord DAVEパッチ（最初に適用する必要がある）
+# Pycord master の PacketDecoder._decode_packet() における
+# DAVE復号とOpusデコードの順序バグを修正する。
+# 参照: https://github.com/Pycord-Development/pycord/issues/3139
+# ─────────────────────────────────────────────
+import patches.discord_opus_dave_fix  # noqa: F401
+
 import asyncio
 import json
 import logging
@@ -652,11 +660,12 @@ worker_task: Optional[asyncio.Task] = None
 _restart_tasks: dict[int, asyncio.Task] = {}
 
 # ─────────────────────────────────────────────
-# [診断ログ] DAVEエラー再接続試行回数カウンター
-# 無限ループ診断用: 各ギルドの再接続試行回数を記録する
+# DAVEエラー自動再接続の試行回数管理
+# 無限ループ防止: 上限に達したら再接続を諦める
 # key: guild_id, value: 試行回数
 # ─────────────────────────────────────────────
-_reconnect_attempts_diag: dict[int, int] = {}
+MAX_RECONNECT_ATTEMPTS: int = 3
+_reconnect_attempts: dict[int, int] = {}
 
 
 @bot.event
@@ -870,17 +879,35 @@ async def _restart_recording_for_guild(guild_id: int) -> None:
             return
 
         # 既に録音中なら再起動不要（別の経路で復旧済み）
+        # 再接続成功とみなしてカウンターをリセットする
         if voice_client.is_recording():
             logger.info("自動再接続: guild=%s は既に録音中のためスキップ", guild.name)
+            _reconnect_attempts.pop(guild_id, None)
             return
 
-        diag_attempt = _reconnect_attempts_diag.get(guild_id, 0)
+        # ── 再接続試行回数の上限チェック ──
+        # DAVEパッチ適用後もエラーが継続する場合の安全弁。
+        # 上限に達したら諦めてエラーログを出力し、無限ループを防止する。
+        attempts = _reconnect_attempts.get(guild_id, 0)
+        if attempts >= MAX_RECONNECT_ATTEMPTS:
+            logger.error(
+                "自動再接続の上限（%d回）に達しました。音声受信を停止します。"
+                " guild=%s | DAVEパッチが機能していない可能性があります。"
+                " 詳細: https://github.com/Pycord-Development/pycord/issues/3139",
+                MAX_RECONNECT_ATTEMPTS,
+                guild.name,
+            )
+            _reconnect_attempts.pop(guild_id, None)
+            return
+
+        _reconnect_attempts[guild_id] = attempts + 1
         logger.warning(
-            "自動再接続: guild=%s | channel=%s で start_recording() を再試行します "
-            "| [診断] これまでの累計試行回数=%d",
+            "自動再接続: guild=%s | channel=%s で start_recording() を再試行します"
+            "（試行 %d/%d）",
             guild.name,
             getattr(voice_client.channel, "name", "unknown"),
-            diag_attempt,
+            attempts + 1,
+            MAX_RECONNECT_ATTEMPTS,
         )
 
         # 古いSinkをクリーンアップ
@@ -901,6 +928,8 @@ async def _restart_recording_for_guild(guild_id: int) -> None:
             guild.name,
             getattr(voice_client.channel, "name", "unknown"),
         )
+        # 再接続成功: カウンターをリセット
+        _reconnect_attempts.pop(guild_id, None)
 
     except Exception as e:
         logger.error(
@@ -955,18 +984,6 @@ def finished_callback(error: Exception | None) -> None:
                     continue  # 既に録音中のギルドはスキップ
 
                 guild_id = guild.id
-
-                # [診断ログ] 試行回数をカウントして無限ループを可視化する
-                diag_count = _reconnect_attempts_diag.get(guild_id, 0) + 1
-                _reconnect_attempts_diag[guild_id] = diag_count
-                logger.warning(
-                    "[診断] DAVEエラー再接続試行回数: guild=%s, 試行=%d回目 | "
-                    "_restart_tasks に既存タスクあり=%s (done=%s)",
-                    guild.name,
-                    diag_count,
-                    guild_id in _restart_tasks,
-                    _restart_tasks[guild_id].done() if guild_id in _restart_tasks else "N/A",
-                )
 
                 # 既に再接続タスクが実行中の場合はスキップ（二重起動防止）
                 existing_task = _restart_tasks.get(guild_id)

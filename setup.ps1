@@ -809,6 +809,32 @@ if ($LASTEXITCODE -ne 0) {
     Write-Log "py-cord master ブランチのインストール完了。"
 }
 
+# DAVEパッチの動作確認
+# Pycord master の PacketDecoder._decode_packet() における DAVE復号バグを修正するパッチを確認する
+# 参照: https://github.com/Pycord-Development/pycord/issues/3139
+Write-Running "DAVEパッチの動作確認をしています..."
+Write-Log "DAVEパッチの動作確認を開始します。"
+$patchScript = Join-Path $InstallDir "patches\discord_opus_dave_fix.py"
+if (Test-Path $patchScript) {
+    $patchResult = & "$InstallDir\venv\Scripts\python.exe" $patchScript 2>&1
+    Write-Log "DAVEパッチ確認結果: $patchResult"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Done "DAVEパッチの動作確認が完了しました"
+        Write-Done "  Pycord の DAVE音声受信バグ (issue #3139) の回避策が適用されます"
+        Write-Log "DAVEパッチ動作確認完了。"
+    } else {
+        Write-Host "  [警告] DAVEパッチの確認に失敗しました: $patchResult" -ForegroundColor Yellow
+        Write-Host "  Bot起動時にパッチが自動適用されますが、音声受信が動作しない可能性があります。" -ForegroundColor Yellow
+        Write-Log "[警告] DAVEパッチ確認失敗: $patchResult"
+        $script:ErrorCount++
+    }
+} else {
+    Write-Host "  [警告] DAVEパッチファイルが見つかりません: $patchScript" -ForegroundColor Yellow
+    Write-Host "  git pull で最新のファイルを取得してください。" -ForegroundColor Yellow
+    Write-Log "[警告] DAVEパッチファイルが見つかりません: $patchScript"
+    $script:ErrorCount++
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ステップ10: .envファイルの対話的設定
 # ─────────────────────────────────────────────────────────────────────────────
