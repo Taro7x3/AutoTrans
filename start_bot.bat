@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal
 
 title AutoTrans Bot
 
@@ -18,7 +18,6 @@ if not exist "%BOT_DIR%venv\Scripts\activate.bat" (
 if not exist "%BOT_DIR%venv\Scripts\activate.bat" (
     echo [ERROR] Virtual environment not found.
     echo Please run run_setup.bat first.
-    echo.
     pause
     exit /b 1
 )
@@ -27,63 +26,40 @@ if not exist "%BOT_DIR%venv\Scripts\activate.bat" (
 if not exist "%BOT_DIR%.env" (
     echo [ERROR] .env file not found.
     echo Please run run_setup.bat first.
-    echo.
     pause
     exit /b 1
 )
 
-:: Check and start Ollama service
+:: Check bot.py exists
+if not exist "%BOT_DIR%bot.py" (
+    echo [ERROR] bot.py not found.
+    echo Please run run_setup.bat first.
+    pause
+    exit /b 1
+)
+
+:: Check and start Ollama service using PowerShell
 echo [INFO] Checking Ollama service...
-ollama list >nul 2>&1
-set OLLAMA_CHECK=!errorlevel!
-if !OLLAMA_CHECK! neq 0 (
+powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:11434' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop; exit 0 } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 (
     echo [INFO] Starting Ollama service...
-    start /B "" ollama serve
-    echo [INFO] Waiting for Ollama to start (5 seconds)...
+    start "" /B ollama serve
     ping -n 6 127.0.0.1 >nul
-    ollama list >nul 2>&1
-    set OLLAMA_CHECK2=!errorlevel!
-    if !OLLAMA_CHECK2! neq 0 (
-        echo [WARN] Ollama service could not be confirmed.
-        echo        Translation features may not work.
-        echo.
-    ) else (
-        echo [INFO] Ollama service started successfully.
-    )
+    echo [INFO] Ollama service started.
 ) else (
     echo [INFO] Ollama service is already running.
 )
 
 echo.
-
-:: Check bot.py exists
-if not exist "%BOT_DIR%bot.py" (
-    echo [ERROR] bot.py not found.
-    echo Please ensure AutoTrans files are correctly placed.
-    echo.
-    pause
-    exit /b 1
-)
-
-:: Activate virtual environment
 echo [INFO] Activating virtual environment...
 call "%BOT_DIR%venv\Scripts\activate.bat"
 
-:: Start bot
-echo [INFO] Starting AutoTrans Bot...
+echo [INFO] Starting bot...
 echo.
-echo ----------------------------------------
-echo   Bot is running. Press Ctrl+C to stop.
-echo ----------------------------------------
-echo.
-
 cd /d "%BOT_DIR%"
 python bot.py
 
 echo.
-echo ----------------------------------------
-echo   Bot stopped.
-echo ----------------------------------------
-echo.
-pause
+echo [INFO] Bot stopped.
 endlocal
+pause
