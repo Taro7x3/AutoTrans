@@ -238,6 +238,7 @@ Write-StepHeader "Python 3.11 のインストール"
 $pythonInstalled = $false
 $pythonExe       = "python"
 
+# Python 3.10〜3.12 がインストール済みか確認（PyTorch対応バージョン）
 try {
     Write-Running "Pythonのバージョンを確認しています..."
     $pv = python --version 2>&1
@@ -245,16 +246,42 @@ try {
     if ($pv -match "Python (\d+)\.(\d+)") {
         $maj = [int]$Matches[1]
         $min = [int]$Matches[2]
-        if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 10)) {
-            Write-Skip "Python $maj.$min がすでにインストールされています。"
+        if ($maj -eq 3 -and $min -ge 10 -and $min -le 12) {
+            Write-Skip "Python $maj.$min が見つかりました（PyTorch対応バージョン）"
+            Write-Log "Python $maj.$min 検出（PyTorch対応）。"
             $pythonInstalled = $true
+        } elseif ($maj -eq 3 -and $min -ge 13) {
+            Write-Info "Python $maj.$min はPyTorch非対応です。Python 3.11をインストールします..."
+            Write-Log "Python $maj.$min はPyTorch非対応（3.13以上）。Python 3.11をインストールします。"
         } else {
-            Write-Info "Python $maj.$min が見つかりましたが 3.10 以上が必要です。Python 3.11 をインストールします。"
+            Write-Info "Python $maj.$min が見つかりましたが 3.10〜3.12 が必要です。Python 3.11 をインストールします。"
+            Write-Log "Python $maj.$min 検出（バージョン不足）。Python 3.11をインストールします。"
         }
     }
 } catch {
     Write-Info "Python が見つかりません。インストールします。"
     Write-Log "Python 未検出: $_"
+}
+
+# py ランチャーで Python 3.11 を確認
+if (-not $pythonInstalled) {
+    try {
+        $py311Ver = & py -3.11 --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $pythonInstalled = $true
+            Write-Skip "Python 3.11 (py launcher) が見つかりました"
+            Write-Log "Python 3.11 (py launcher) 検出済み。"
+        }
+    } catch {}
+}
+
+# LOCALAPPDATA のパスを確認
+if (-not $pythonInstalled) {
+    if (Test-Path "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe") {
+        $pythonInstalled = $true
+        Write-Skip "Python 3.11 が見つかりました: $env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+        Write-Log "Python 3.11 検出済み: $env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+    }
 }
 
 if (-not $pythonInstalled) {
@@ -269,9 +296,8 @@ if (-not $pythonInstalled) {
 
         $pyPaths = @(
             "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-            "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
             "C:\Python311\python.exe",
-            "C:\Python310\python.exe"
+            "$env:ProgramFiles\Python311\python.exe"
         )
         foreach ($p in $pyPaths) {
             if (Test-Path $p) { $pythonExe = $p; Write-Log "Python発見: $p"; break }
@@ -291,17 +317,40 @@ if (-not $pythonInstalled) {
     }
 }
 
-if ($pythonExe -eq "python") {
-    $pyPaths = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
-        "C:\Python311\python.exe"
-    )
-    foreach ($p in $pyPaths) {
-        if (Test-Path $p) { $pythonExe = $p; Write-Log "Python設定: $p"; break }
+# Python 3.11 のフルパスを解決する
+$python311Path = $null
+$possiblePaths = @(
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "C:\Python311\python.exe",
+    "$env:ProgramFiles\Python311\python.exe"
+)
+foreach ($path in $possiblePaths) {
+    if (Test-Path $path) {
+        $python311Path = $path
+        Write-Log "Python 3.11 フルパス発見: $path"
+        break
     }
 }
-Write-Info "使用するPython: $pythonExe"
+
+# py ランチャーで Python 3.11 を探す
+if (-not $python311Path) {
+    try {
+        $pyOutput = & py -3.11 --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $python311Path = (& py -3.11 -c "import sys; print(sys.executable)" 2>&1).Trim()
+            Write-Log "Python 3.11 フルパス (py launcher): $python311Path"
+        }
+    } catch {}
+}
+
+if ($python311Path) {
+    $pythonExe = $python311Path
+    Write-Info "使用するPython 3.11: $pythonExe"
+    Write-Log "pythonExe を Python 3.11 フルパスに設定: $pythonExe"
+} else {
+    Write-Info "使用するPython: $pythonExe"
+    Write-Log "Python 3.11 フルパスが見つかりません。pythonExe=$pythonExe を使用します。"
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ステップ5: AutoTrans リポジトリのダウンロード
@@ -635,8 +684,17 @@ if (Test-Path $venvPython) {
 } else {
     try {
         Write-Running "Python仮想環境を作成しています..."
-        Write-Log "python -m venv $venvPath を実行します。"
-        & $pythonExe -m venv $venvPath 2>&1 | ForEach-Object { Write-Log "  venv: $_" }
+
+        # Python 3.11 のフルパスを使用して仮想環境を作成
+        if ($python311Path) {
+            Write-Log "Python 3.11 フルパスで venv を作成します: $python311Path -m venv $venvPath --clear"
+            Write-Info "Python 3.11 を使用: $python311Path"
+            & $python311Path -m venv $venvPath --clear 2>&1 | ForEach-Object { Write-Log "  venv: $_" }
+        } else {
+            Write-Log "python -m venv $venvPath を実行します（pythonExe=$pythonExe）。"
+            & $pythonExe -m venv $venvPath 2>&1 | ForEach-Object { Write-Log "  venv: $_" }
+        }
+
         if (Test-Path $venvPython) {
             Write-Done "仮想環境を作成しました: $venvPath"
         } else {

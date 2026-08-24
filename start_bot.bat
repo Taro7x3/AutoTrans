@@ -51,19 +51,19 @@ if errorlevel 1 (
 )
 
 echo.
-echo [INFO] Activating virtual environment...
-call "%BOT_DIR%venv\Scripts\activate.bat"
 
 :: Check and install PyTorch if missing
 echo [INFO] Checking PyTorch installation...
-python -c "import torch" >nul 2>&1
+"%BOT_DIR%venv\Scripts\python.exe" -c "import torch" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] PyTorch not found. Installing PyTorch with CUDA support...
     echo [INFO] This may take several minutes...
-    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+    "%BOT_DIR%venv\Scripts\pip.exe" install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir
     if errorlevel 1 (
         echo [ERROR] Failed to install PyTorch.
-        echo Please run manually: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        echo Please run manually:
+        echo   cd /d "%BOT_DIR%"
+        echo   venv\Scripts\pip.exe install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
         pause
         exit /b 1
     )
@@ -73,7 +73,7 @@ if errorlevel 1 (
 echo [INFO] Starting bot...
 echo.
 cd /d "%BOT_DIR%"
-python bot.py
+"%BOT_DIR%venv\Scripts\python.exe" bot.py
 
 echo.
 echo [INFO] Bot stopped.
