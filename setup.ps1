@@ -1,10 +1,11 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoTrans Discord翻訳Bot 自動セットアップスクリプト
 .DESCRIPTION
-    Python 3.11、FFmpeg、Ollama、AIモデル、Pythonパッケージを自動インストールし、
+    Git、Python 3.11、FFmpeg、Ollama、AIモデル、Pythonパッケージを自動インストールし、
     Discord Botが動作する環境を構築します。
+    GitHubからリポジトリをcloneして完全セットアップします。
 .NOTES
     対象OS: Windows 11 / 必要環境: NVIDIA GPU (VRAM 8GB以上)、インターネット接続
 #>
@@ -19,9 +20,11 @@ chcp 65001 | Out-Null
 # ─────────────────────────────────────────────────────────────────────────────
 # グローバル変数
 # ─────────────────────────────────────────────────────────────────────────────
-$ScriptDir          = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LogFile            = Join-Path $ScriptDir "setup_log.txt"
-$TotalSteps         = 10
+$RepoUrl            = "https://github.com/Taro7x3/AutoTrans"
+$InstallDir         = "$env:USERPROFILE\AutoTrans"
+$tempLogFile        = "$env:TEMP\AutoTrans_setup_log.txt"
+$LogFile            = Join-Path $InstallDir "setup_log.txt"
+$TotalSteps         = 12
 $script:CurrentStep = 0
 $script:ErrorCount  = 0
 
@@ -31,7 +34,14 @@ $script:ErrorCount  = 0
 function Write-Log {
     param([string]$Message)
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogFile -Value "[$ts] $Message" -Encoding UTF8
+    try {
+        Add-Content -Path $tempLogFile -Value "[$ts] $Message" -Encoding UTF8
+        if (Test-Path $InstallDir) {
+            Add-Content -Path $LogFile -Value "[$ts] $Message" -Encoding UTF8
+        }
+    } catch {
+        # ログ書き込み失敗は無視
+    }
 }
 
 function Write-StepHeader {
@@ -70,11 +80,11 @@ function Refresh-Path {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ログファイル初期化
+# ログファイル初期化（一時ファイル）
 # ─────────────────────────────────────────────────────────────────────────────
 $startTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Set-Content -Path $LogFile -Value "AutoTrans Bot セットアップログ - $startTime" -Encoding UTF8
-Add-Content -Path $LogFile -Value ("=" * 60) -Encoding UTF8
+Set-Content -Path $tempLogFile -Value "AutoTrans Bot セットアップログ - $startTime" -Encoding UTF8
+Add-Content -Path $tempLogFile -Value ("=" * 60) -Encoding UTF8
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ステップ0: 管理者権限チェック
@@ -114,18 +124,19 @@ Write-Host "║     Discord 日韓リアルタイム翻訳Bot                   
 Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  このスクリプトは以下をインストールします：" -ForegroundColor White
+Write-Host "    ✓ Git" -ForegroundColor Green
 Write-Host "    ✓ Python 3.11" -ForegroundColor Green
 Write-Host "    ✓ FFmpeg" -ForegroundColor Green
 Write-Host "    ✓ Ollama (ローカルAI実行環境)" -ForegroundColor Green
 Write-Host "    ✓ AIモデル (qwen2.5:7b-instruct) ※約4GB" -ForegroundColor Green
 Write-Host "    ✓ 必要なPythonパッケージ" -ForegroundColor Green
 Write-Host ""
-Write-Host "  ログファイル: $LogFile" -ForegroundColor DarkGray
+Write-Host "  インストール先: $InstallDir" -ForegroundColor White
 Write-Host ""
 Write-Host "  続行するには Enter キーを押してください..." -ForegroundColor White
 Read-Host | Out-Null
 
-Write-Log "セットアップ開始。スクリプトディレクトリ: $ScriptDir"
+Write-Log "セットアップ開始。インストール先: $InstallDir"
 $script:CurrentStep = 1
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,7 +174,64 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ3: Python 3.11のインストール
+# ステップ3: Git のインストール確認
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Git のインストール確認"
+
+$gitInstalled = $false
+
+try {
+    Write-Running "Git のバージョンを確認しています..."
+    $gv = git --version 2>&1
+    if ($LASTEXITCODE -eq 0 -and $gv -match "git version") {
+        Write-Skip "Git がすでにインストールされています: $gv"
+        Write-Log "Git 検出: $gv"
+        $gitInstalled = $true
+    } else {
+        throw "Git が見つかりません"
+    }
+} catch {
+    Write-Info "Git が見つかりません。インストールします。"
+}
+
+if (-not $gitInstalled) {
+    try {
+        Write-Running "Git をインストールしています..."
+        Write-Log "winget install Git.Git を実行します。"
+        winget install --id Git.Git --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object {
+            Write-Log "  winget: $_"
+        }
+        Write-Running "PATHを更新しています..."
+        Refresh-Path
+
+        $gitPaths = @(
+            "C:\Program Files\Git\cmd",
+            "C:\Program Files (x86)\Git\cmd"
+        )
+        foreach ($gp in $gitPaths) {
+            if (Test-Path "$gp\git.exe") {
+                $env:Path += ";$gp"
+                Write-Log "Git パス追加: $gp"
+                break
+            }
+        }
+
+        $gv2 = git --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and $gv2 -match "git version") {
+            Write-Done "Git のインストールが完了しました: $gv2"
+            $gitInstalled = $true
+        } else {
+            throw "インストール後も Git が見つかりません"
+        }
+    } catch {
+        Write-Err "Git のインストールに失敗しました: $_"
+        Write-Log "Git インストールエラー: $_"
+        Confirm-Continue "Git のインストールに失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ4: Python 3.11のインストール
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "Python 3.11 のインストール"
 
@@ -236,7 +304,72 @@ if ($pythonExe -eq "python") {
 Write-Info "使用するPython: $pythonExe"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ4: FFmpegのインストール
+# ステップ5: AutoTrans リポジトリのダウンロード
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "AutoTrans リポジトリのダウンロード"
+
+if (Test-Path $InstallDir) {
+    Write-Host ""
+    Write-Host "  $InstallDir に既存のインストールが見つかりました。" -ForegroundColor Yellow
+    $upd = Read-Host "  上書き更新しますか？ (Y/N)"
+    if ($upd -match '^[Yy]') {
+        try {
+            Write-Running "リポジトリを更新しています (git pull)..."
+            Write-Log "git -C $InstallDir pull を実行します。"
+            git -C $InstallDir pull 2>&1 | ForEach-Object { Write-Log "  git pull: $_" }
+            if ($LASTEXITCODE -eq 0) {
+                Write-Done "リポジトリを更新しました: $InstallDir"
+            } else {
+                throw "git pull が終了コード $LASTEXITCODE で終了しました"
+            }
+        } catch {
+            Write-Host "  [警告] アップデートに失敗しました。既存のファイルを使用します。" -ForegroundColor Yellow
+            Write-Log "[警告] git pull エラー: $_"
+        }
+    } else {
+        Write-Skip "既存のインストールをそのまま使用します。"
+        Write-Log "既存インストールをスキップ。"
+    }
+} else {
+    try {
+        Write-Running "リポジトリをダウンロードしています (git clone)..."
+        Write-Log "git clone $RepoUrl $InstallDir を実行します。"
+        git clone $RepoUrl $InstallDir 2>&1 | ForEach-Object { Write-Log "  git clone: $_" }
+        if ($LASTEXITCODE -ne 0) {
+            throw "git clone に失敗しました (終了コード: $LASTEXITCODE)"
+        }
+        Write-Done "リポジトリをダウンロードしました: $InstallDir"
+        Write-Log "git clone 完了。"
+    } catch {
+        Write-Err "リポジトリのダウンロードに失敗しました: $_"
+        Write-Log "git clone エラー: $_"
+        Write-Host "  インターネット接続を確認してください。" -ForegroundColor Yellow
+        Confirm-Continue "リポジトリのダウンロードに失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+# InstallDir に移動して以降の処理を実行
+if (Test-Path $InstallDir) {
+    Set-Location $InstallDir
+    Write-Log "作業ディレクトリを変更しました: $InstallDir"
+
+    # ログファイルを InstallDir にコピー
+    try {
+        if (Test-Path $tempLogFile) {
+            Copy-Item -Path $tempLogFile -Destination $LogFile -Force
+        }
+    } catch {
+        # ログ移行失敗は無視
+    }
+} else {
+    Write-Err "インストールディレクトリが見つかりません: $InstallDir"
+    Write-Host "  セットアップを続行できません。" -ForegroundColor Red
+    Read-Host "Enterキーで終了します"
+    exit 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ6: FFmpegのインストール
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "FFmpeg のインストール"
 
@@ -273,7 +406,7 @@ if (-not $ffmpegInstalled) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ5: Ollamaのインストール
+# ステップ7: Ollamaのインストール
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "Ollama のインストール"
 
@@ -344,7 +477,7 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ6: AIモデルのダウンロード
+# ステップ8: AIモデルのダウンロード
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "AIモデル (qwen2.5:7b-instruct) のダウンロード"
 
@@ -379,12 +512,12 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ7: Python仮想環境の作成とパッケージインストール
+# ステップ9: Python仮想環境の作成とパッケージインストール
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "Python仮想環境の作成とパッケージインストール"
 
-Set-Location $ScriptDir
-$venvPath   = Join-Path $ScriptDir "venv"
+Set-Location $InstallDir
+$venvPath   = Join-Path $InstallDir "venv"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvPip    = Join-Path $venvPath "Scripts\pip.exe"
 
@@ -437,7 +570,7 @@ try {
     Confirm-Continue "PyTorch のインストールに失敗しました。続行しますか？ (Y/N)"
 }
 
-$reqFile = Join-Path $ScriptDir "requirements.txt"
+$reqFile = Join-Path $InstallDir "requirements.txt"
 if (Test-Path $reqFile) {
     try {
         Write-Running "requirements.txt からパッケージをインストールしています..."
@@ -462,11 +595,11 @@ if (Test-Path $reqFile) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ8: .envファイルの対話的設定
+# ステップ10: .envファイルの対話的設定
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "Discord Bot の設定 (.envファイルの作成)"
 
-$envFile     = Join-Path $ScriptDir ".env"
+$envFile     = Join-Path $InstallDir ".env"
 $doCreateEnv = $true
 
 if (Test-Path $envFile) {
@@ -566,21 +699,21 @@ if ($doCreateEnv) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ9: デスクトップショートカットの作成
+# ステップ11: デスクトップショートカットの作成
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "デスクトップショートカットの作成"
 
 try {
     $desktopPath  = [System.Environment]::GetFolderPath("Desktop")
     $shortcutPath = Join-Path $desktopPath "AutoTrans Bot 起動.lnk"
-    $targetBat    = Join-Path $ScriptDir "start_bot.bat"
+    $targetBat    = Join-Path $InstallDir "start_bot.bat"
 
     Write-Running "デスクトップにショートカットを作成しています..."
 
     $wsh      = New-Object -ComObject WScript.Shell
     $lnk      = $wsh.CreateShortcut($shortcutPath)
     $lnk.TargetPath       = $targetBat
-    $lnk.WorkingDirectory = $ScriptDir
+    $lnk.WorkingDirectory = $InstallDir
     $lnk.Description      = "AutoTrans Discord翻訳Bot を起動します"
     $lnk.WindowStyle      = 1
 
@@ -595,11 +728,11 @@ try {
 } catch {
     Write-Err "ショートカットの作成に失敗しました: $_"
     Write-Log "ショートカット作成エラー: $_"
-    Write-Info "手動で start_bot.bat のショートカットをデスクトップに作成してください。"
+    Write-Info "手動で $InstallDir\start_bot.bat のショートカットをデスクトップに作成してください。"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ステップ10: 完了メッセージ
+# ステップ12: 完了メッセージ
 # ─────────────────────────────────────────────────────────────────────────────
 Write-StepHeader "セットアップ完了"
 
@@ -619,10 +752,13 @@ if ($script:ErrorCount -eq 0) {
 }
 
 Write-Host ""
+Write-Host "  インストール先: $InstallDir" -ForegroundColor White
+Write-Host "  起動方法: デスクトップの「AutoTrans Bot 起動」をダブルクリック" -ForegroundColor White
+Write-Host ""
 Write-Host "  次のステップ：" -ForegroundColor White
 Write-Host ""
 Write-Host "  1. デスクトップの AutoTrans Bot 起動 をダブルクリック" -ForegroundColor Cyan
-Write-Host "     または start_bot.bat を実行してBotを起動" -ForegroundColor Gray
+Write-Host "     または $InstallDir\start_bot.bat を実行してBotを起動" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  2. Discordで /join コマンドを実行して" -ForegroundColor Cyan
 Write-Host "     BotをボイスチャンネルにJoinさせる" -ForegroundColor Gray
@@ -637,7 +773,7 @@ Write-Host "  何かお困りの場合は SETUP.md を参照してください�
 Write-Host "  -----------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
-$et = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$et  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $ec2 = $script:ErrorCount
 Write-Log "セットアップ完了。終了時刻: $et。エラー数: $ec2"
 
