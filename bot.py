@@ -545,7 +545,7 @@ def transcribe_audio(audio_bytes: bytes, sample_rate: int) -> tuple[str, str]:
         condition_on_previous_text=False, # 直前の幻覚を引きずらない
         no_speech_threshold=0.6,          # 声が入っていない場合の幻覚を防止
         # Whisperに日韓の会話コンテキストをプロンプトとして渡す（言語判定精度が劇的に向上）
-        initial_prompt="日本語と韓国語の会話です。オーバーウォッチのVCコール。안녕하세요, 반갑습니다.",
+        prompt = "こんにちは、ありがとう。ナイス、ヒール、敵、Ult、裏。안녕하세요, 감사합니다. 나이스, 힐, 적, 궁, 뒤.",
     )
 
     # セグメントを結合してテキストを生成
