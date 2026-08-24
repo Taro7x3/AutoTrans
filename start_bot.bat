@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 title AutoTrans Bot
 
@@ -35,13 +35,15 @@ if not exist "%BOT_DIR%.env" (
 :: Check and start Ollama service
 echo [INFO] Checking Ollama service...
 ollama list >nul 2>&1
-if %errorlevel% neq 0 (
+set OLLAMA_CHECK=!errorlevel!
+if !OLLAMA_CHECK! neq 0 (
     echo [INFO] Starting Ollama service...
-    start /B ollama serve >nul 2>&1
+    start /B "" ollama serve
     echo [INFO] Waiting for Ollama to start (5 seconds)...
-    timeout /t 5 /nobreak >nul
+    ping -n 6 127.0.0.1 >nul
     ollama list >nul 2>&1
-    if %errorlevel% neq 0 (
+    set OLLAMA_CHECK2=!errorlevel!
+    if !OLLAMA_CHECK2! neq 0 (
         echo [WARN] Ollama service could not be confirmed.
         echo        Translation features may not work.
         echo.
