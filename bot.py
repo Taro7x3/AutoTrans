@@ -594,7 +594,7 @@ async def translation_worker(
                     translated_text,
                 )
             except Exception as e:
-                logger.error("翻訳エラー | user=%s: %s", display_name, e)
+                logger.error("翻訳エラー | user=%s:", display_name, exc_info=True)
                 queue.task_done()
                 continue
 
