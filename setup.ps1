@@ -133,8 +133,7 @@ Write-Host "    ✓ 必要なPythonパッケージ" -ForegroundColor Green
 Write-Host ""
 Write-Host "  インストール先: $InstallDir" -ForegroundColor White
 Write-Host ""
-Write-Host "  続行するには Enter キーを押してください..." -ForegroundColor White
-Read-Host | Out-Null
+Read-Host "  続行するには Enter キーを押してください" | Out-Null
 
 Write-Log "セットアップ開始。インストール先: $InstallDir"
 $script:CurrentStep = 1
@@ -606,7 +605,7 @@ $apiReady = $false
 Write-Running "Ollama API の応答を確認しています..."
 for ($i = 0; $i -lt 12; $i++) {
     try {
-        $response = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 3 -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         $apiReady = $true
         Write-Done "Ollama API が応答しています。"
         Write-Log "Ollama API 応答確認済み。"
