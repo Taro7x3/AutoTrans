@@ -201,6 +201,7 @@ class VADSink(discord.sinks.Sink):
 
     def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         super().__init__(filters=None)
+        self.client = None  # VoiceClientへの参照（start_recording後に手動設定）
         self.queue = queue
         self.loop = loop
 
@@ -793,11 +794,13 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
 
     # py-cordの音声受信を開始
     # finished_callbackは stop_recording() 呼び出し後に実行される
+    # py-cord master: start_recording(sink, callback) — ctx.channel は不要
     voice_client.start_recording(
         sink,
         finished_callback,
-        ctx.channel,
     )
+    # reader.py の self.sink._client = client がコメントアウトされているため手動設定
+    sink.client = voice_client
 
     logger.info(
         "音声受信開始 | guild=%s | channel=%s",
@@ -811,17 +814,18 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
     )
 
 
-async def finished_callback(
-    sink: VADSink,
-    channel: discord.TextChannel,
-    *args,
-) -> None:
+async def finished_callback(error: Exception | None) -> None:
     """
     py-cordの音声受信終了時に呼ばれるコールバック。
     stop_recording()が呼ばれた際に実行される。
+
+    py-cord master の AfterCallback = Callable[[Exception | None], Any] に合わせて
+    引数は error のみ（旧 py-cord 2.4.x の sink, channel, *args とは異なる）。
     """
+    if error:
+        logger.error("音声受信エラー: %s", error)
     logger.info("音声受信終了コールバック実行")
-    sink.cleanup()
+    # Sinkのクリーンアップは active_sinks 経由で leave_command が行う
 
 
 @bot.slash_command(
