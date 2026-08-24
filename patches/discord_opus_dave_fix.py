@@ -164,39 +164,32 @@ def _patched_decrypt_rtp(self, packet):
                 offset = packet.update_extended_header(raw_payload)
 
             try:
-                # davey には raw_payload をそのまま渡す（認証タグ検証のため）
+                # davey に raw_payload をそのまま渡して復号
+                # ※ davey は拡張ヘッダーを AAD として処理し、
+                #    復号結果として「拡張ヘッダーを除去した純粋な Opus フレーム」を返します。
                 decrypted_audio = _davey.DaveSession.decrypt(
                     dave, uid, _davey.MediaType.audio, raw_payload
                 )
                 _diag_counters["decrypt_rtp_dave_ok"] += 1
                 _log.debug(
-                    "[DAVE patch decrypt_rtp] DAVE decrypt OK for ssrc=%s uid=%s "
-                    "(dave.ready=%s, extended=%s, offset=%d)",
+                    "[DAVE patch decrypt_rtp] DAVE decrypt OK for ssrc=%s uid=%s (extended=%s)",
                     packet.ssrc,
                     uid,
-                    dave.ready,
                     packet.extended,
-                    offset,
                 )
 
-                # 事前計算したオフセットで拡張ヘッダー分をスライス
-                if offset > 0:
-                    packet.decrypted_data = decrypted_audio[offset:]
-                else:
-                    packet.decrypted_data = decrypted_audio
+                # 復号結果をそのまま代入（手動スライスは不要）
+                packet.decrypted_data = decrypted_audio
 
             except Exception as exc:
                 _diag_counters["decrypt_rtp_dave_fail"] += 1
-                # ── 修正: ERROR レベルで例外の詳細と型を出力する ──
                 _log.error(
-                    "[DAVE patch decrypt_rtp] DAVE decrypt FAILED for ssrc=%s uid=%s (extended=%s, offset=%d): %s (%s)",
+                    "[DAVE patch decrypt_rtp] DAVE decrypt FAILED for ssrc=%s uid=%s: %s (%s)",
                     packet.ssrc,
                     uid,
-                    packet.extended,
-                    offset,
                     exc,
                     type(exc).__name__,
-                    exc_info=True, # スタックトレースも出力
+                    exc_info=True,
                 )
                 packet.decrypted_data = OPUS_SILENCE
         else:
