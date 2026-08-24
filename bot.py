@@ -830,18 +830,120 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
     )
 
 
-async def finished_callback(error: Exception | None) -> None:
+async def _restart_recording_after_dave_error() -> None:
+    """
+    DAVEエラーで stop_recording() が呼ばれた後、
+    自動的に start_recording() を再試行する非同期関数。
+    finished_callback から asyncio.run_coroutine_threadsafe() 経由で呼ばれる。
+    """
+    # ── 診断ログ: この関数が実際に実行されているか確認 ──
+    logger.info("[DIAG] _restart_recording_after_dave_error 開始")
+
+    await asyncio.sleep(3.0)  # DAVEエラー後、少し待ってから再試行
+
+    # 全ギルドのVCを確認して再接続
+    for guild in bot.guilds:
+        voice_client = guild.voice_client
+        if voice_client is None:
+            logger.info("[DIAG] guild=%s: voice_client なし（スキップ）", guild.name)
+            continue
+
+        # ── 診断ログ: is_listening() の状態を確認 ──
+        is_listening = voice_client.is_listening()
+        logger.info(
+            "[DIAG] guild=%s | is_listening=%s | channel=%s",
+            guild.name,
+            is_listening,
+            getattr(voice_client.channel, "name", "unknown"),
+        )
+
+        if not is_listening:
+            logger.warning(
+                "[DIAG] guild=%s: 音声受信が停止しています。再起動を試みます...",
+                guild.name,
+            )
+            try:
+                # 古いSinkをクリーンアップ
+                if guild.id in active_sinks:
+                    logger.info("[DIAG] 古いSinkをクリーンアップ | guild=%s", guild.name)
+                    active_sinks[guild.id].cleanup()
+                    del active_sinks[guild.id]
+
+                # 新しいVADSinkを作成して録音を再開
+                loop = asyncio.get_event_loop()
+                new_sink = VADSink(queue=audio_queue, loop=loop)
+                active_sinks[guild.id] = new_sink
+
+                voice_client.start_recording(new_sink, finished_callback)
+                new_sink.vc = voice_client
+
+                logger.info(
+                    "[DIAG] 音声受信を再起動しました | guild=%s | channel=%s",
+                    guild.name,
+                    getattr(voice_client.channel, "name", "unknown"),
+                )
+            except Exception as e:
+                logger.error(
+                    "[DIAG] 音声受信の再起動に失敗しました | guild=%s: %s",
+                    guild.name,
+                    e,
+                    exc_info=True,
+                )
+
+
+def finished_callback(error: Exception | None) -> None:
     """
     py-cordの音声受信終了時に呼ばれるコールバック。
     stop_recording()が呼ばれた際に実行される。
 
+    【重要】reader.py:151 で self.after(self.error) と同期的に呼び出されるため、
+    この関数は async def ではなく通常の def でなければならない。
+    async def にすると "coroutine was never awaited" 警告が発生し、
+    コールバック内の処理が一切実行されない。
+
     py-cord master の AfterCallback = Callable[[Exception | None], Any] に合わせて
     引数は error のみ（旧 py-cord 2.4.x の sink, channel, *args とは異なる）。
     """
+    # ── 診断ログ: コールバックが実際に呼ばれているか確認 ──
+    logger.info(
+        "[DIAG] finished_callback 呼び出し確認 | error=%s | type=%s",
+        error,
+        type(error).__name__ if error else "None",
+    )
+
     if error:
-        logger.error("音声受信エラー: %s", error)
-    logger.info("音声受信終了コールバック実行")
-    # Sinkのクリーンアップは active_sinks 経由で leave_command が行う
+        import traceback
+        logger.error(
+            "[DIAG] 音声受信エラー詳細:\n%s",
+            "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        )
+
+        # ── 診断: DAVEエラー（OpusError: corrupted stream）かどうか判定 ──
+        error_str = str(error).lower()
+        is_dave_error = (
+            "corrupted stream" in error_str
+            or "opus" in type(error).__name__.lower()
+            or "dave" in error_str
+        )
+        logger.info(
+            "[DIAG] DAVEエラー判定: is_dave_error=%s | error_class=%s",
+            is_dave_error,
+            type(error).__name__,
+        )
+
+        if is_dave_error:
+            logger.warning(
+                "[DIAG] DAVEエラーを検出。自動再接続を試みます（3秒後）..."
+            )
+            # 非同期処理をスレッドセーフに実行
+            asyncio.run_coroutine_threadsafe(
+                _restart_recording_after_dave_error(),
+                bot.loop,
+            )
+        else:
+            logger.error("[DIAG] 未知のエラーのため自動再接続をスキップします")
+    else:
+        logger.info("[DIAG] 正常終了（エラーなし）")
 
 
 @bot.slash_command(
