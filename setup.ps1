@@ -1,0 +1,645 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    AutoTrans Discord翻訳Bot 自動セットアップスクリプト
+.DESCRIPTION
+    Python 3.11、FFmpeg、Ollama、AIモデル、Pythonパッケージを自動インストールし、
+    Discord Botが動作する環境を構築します。
+.NOTES
+    対象OS: Windows 11 / 必要環境: NVIDIA GPU (VRAM 8GB以上)、インターネット接続
+#>
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 文字コード設定
+# ─────────────────────────────────────────────────────────────────────────────
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# グローバル変数
+# ─────────────────────────────────────────────────────────────────────────────
+$ScriptDir          = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LogFile            = Join-Path $ScriptDir "setup_log.txt"
+$TotalSteps         = 10
+$script:CurrentStep = 0
+$script:ErrorCount  = 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ユーティリティ関数
+# ─────────────────────────────────────────────────────────────────────────────
+function Write-Log {
+    param([string]$Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogFile -Value "[$ts] $Message" -Encoding UTF8
+}
+
+function Write-StepHeader {
+    param([string]$StepName)
+    $script:CurrentStep++
+    $n = $script:CurrentStep
+    Write-Host ""
+    Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "[$n/$TotalSteps] Step $n`: $StepName" -ForegroundColor White
+    Write-Host "-----------------------------------------------------" -ForegroundColor DarkGray
+    Write-Log "=== Step $n`: $StepName ==="
+}
+
+function Write-Running { param([string]$m); Write-Host "  [実行中] $m" -ForegroundColor Yellow;  Write-Log "[実行中] $m" }
+function Write-Done    { param([string]$m); Write-Host "  [完了]   $m" -ForegroundColor Green;   Write-Log "[完了] $m" }
+function Write-Skip    { param([string]$m); Write-Host "  [スキップ] $m" -ForegroundColor Cyan;  Write-Log "[スキップ] $m" }
+function Write-Err     { param([string]$m); Write-Host "  [エラー] $m" -ForegroundColor Red;     Write-Log "[エラー] $m"; $script:ErrorCount++ }
+function Write-Info    { param([string]$m); Write-Host "  $m" -ForegroundColor Gray;             Write-Log "[情報] $m" }
+
+function Confirm-Continue {
+    param([string]$Prompt = "続行しますか？ (Y/N)")
+    Write-Host ""
+    $ans = Read-Host $Prompt
+    if ($ans -notmatch '^[Yy]') {
+        Write-Host "セットアップを中断しました。" -ForegroundColor Yellow
+        Write-Log "ユーザーによりセットアップが中断されました。"
+        exit 1
+    }
+}
+
+function Refresh-Path {
+    $mp      = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $up      = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$mp;$up"
+    Write-Log "PATHを更新しました。"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ログファイル初期化
+# ─────────────────────────────────────────────────────────────────────────────
+$startTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Set-Content -Path $LogFile -Value "AutoTrans Bot セットアップログ - $startTime" -Encoding UTF8
+Add-Content -Path $LogFile -Value ("=" * 60) -Encoding UTF8
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ0: 管理者権限チェック
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "  管理者権限を確認しています..." -ForegroundColor Gray
+
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "  管理者権限が必要です。管理者として再起動します..." -ForegroundColor Yellow
+    Write-Log "管理者権限なし。管理者として再起動します。"
+    Start-Sleep -Seconds 2
+    $sp = $MyInvocation.MyCommand.Path
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$sp`"" -Verb RunAs
+    exit
+}
+
+Write-Log "管理者権限確認済み。"
+
+try {
+    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction SilentlyContinue
+    Write-Log "実行ポリシーを RemoteSigned に設定しました。"
+} catch {
+    Write-Log "実行ポリシーの設定をスキップしました。"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ1: ウェルカムメッセージ
+# ─────────────────────────────────────────────────────────────────────────────
+Clear-Host
+Write-Host ""
+Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║     AutoTrans Bot セットアップウィザード              ║" -ForegroundColor Cyan
+Write-Host "║     Discord 日韓リアルタイム翻訳Bot                   ║" -ForegroundColor Cyan
+Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  このスクリプトは以下をインストールします：" -ForegroundColor White
+Write-Host "    ✓ Python 3.11" -ForegroundColor Green
+Write-Host "    ✓ FFmpeg" -ForegroundColor Green
+Write-Host "    ✓ Ollama (ローカルAI実行環境)" -ForegroundColor Green
+Write-Host "    ✓ AIモデル (qwen2.5:7b-instruct) ※約4GB" -ForegroundColor Green
+Write-Host "    ✓ 必要なPythonパッケージ" -ForegroundColor Green
+Write-Host ""
+Write-Host "  ログファイル: $LogFile" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  続行するには Enter キーを押してください..." -ForegroundColor White
+Read-Host | Out-Null
+
+Write-Log "セットアップ開始。スクリプトディレクトリ: $ScriptDir"
+$script:CurrentStep = 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ2: wingetの確認
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "winget の確認"
+
+try {
+    Write-Running "winget のバージョンを確認しています..."
+    $wv = winget --version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Done "winget が見つかりました: $wv"
+        Write-Log "winget バージョン: $wv"
+    } else {
+        throw "winget コマンドが失敗しました"
+    }
+} catch {
+    Write-Err "winget が見つかりません。"
+    Write-Host ""
+    Write-Host "  winget (App Installer) をインストールする必要があります。" -ForegroundColor Yellow
+    Write-Host "  Microsoft Store を開いて App Installer を検索し、" -ForegroundColor Yellow
+    Write-Host "  インストールしてからこのスクリプトを再実行してください。" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Log "winget が見つかりません。Microsoft Store を開きます。"
+    try {
+        Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1"
+    } catch {
+        Start-Process "https://apps.microsoft.com/store/detail/app-installer/9NBLGGH4NNS1"
+    }
+    Write-Host "  Microsoft Store を開きました。App Installer をインストール後、" -ForegroundColor Cyan
+    Write-Host "  このスクリプトを再実行してください。" -ForegroundColor Cyan
+    Write-Host ""
+    Read-Host "Enterキーで終了します"
+    exit 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ3: Python 3.11のインストール
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Python 3.11 のインストール"
+
+$pythonInstalled = $false
+$pythonExe       = "python"
+
+try {
+    Write-Running "Pythonのバージョンを確認しています..."
+    $pv = python --version 2>&1
+    Write-Log "python --version: $pv"
+    if ($pv -match "Python (\d+)\.(\d+)") {
+        $maj = [int]$Matches[1]
+        $min = [int]$Matches[2]
+        if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 10)) {
+            Write-Skip "Python $maj.$min がすでにインストールされています。"
+            $pythonInstalled = $true
+        } else {
+            Write-Info "Python $maj.$min が見つかりましたが 3.10 以上が必要です。Python 3.11 をインストールします。"
+        }
+    }
+} catch {
+    Write-Info "Python が見つかりません。インストールします。"
+    Write-Log "Python 未検出: $_"
+}
+
+if (-not $pythonInstalled) {
+    try {
+        Write-Running "Python 3.11 をインストールしています... (数分かかる場合があります)"
+        Write-Log "winget install Python.Python.3.11 を実行します。"
+        winget install --id Python.Python.3.11 --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object {
+            Write-Log "  winget: $_"
+        }
+        Write-Running "PATHを更新しています..."
+        Refresh-Path
+
+        $pyPaths = @(
+            "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+            "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+            "C:\Python311\python.exe",
+            "C:\Python310\python.exe"
+        )
+        foreach ($p in $pyPaths) {
+            if (Test-Path $p) { $pythonExe = $p; Write-Log "Python発見: $p"; break }
+        }
+
+        $pv2 = & $pythonExe --version 2>&1
+        if ($pv2 -match "Python") {
+            Write-Done "Python のインストールが完了しました: $pv2"
+            $pythonInstalled = $true
+        } else {
+            throw "インストール後もPythonが見つかりません"
+        }
+    } catch {
+        Write-Err "Python のインストールに失敗しました: $_"
+        Write-Log "Python インストールエラー: $_"
+        Confirm-Continue "Python のインストールに失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+if ($pythonExe -eq "python") {
+    $pyPaths = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "C:\Python311\python.exe"
+    )
+    foreach ($p in $pyPaths) {
+        if (Test-Path $p) { $pythonExe = $p; Write-Log "Python設定: $p"; break }
+    }
+}
+Write-Info "使用するPython: $pythonExe"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ4: FFmpegのインストール
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "FFmpeg のインストール"
+
+$ffmpegInstalled = $false
+
+try {
+    Write-Running "FFmpeg のバージョンを確認しています..."
+    $fv = ffmpeg -version 2>&1 | Select-Object -First 1
+    if ($fv -match "ffmpeg version") {
+        Write-Skip "FFmpeg がすでにインストールされています。"
+        Write-Log "FFmpeg 検出: $fv"
+        $ffmpegInstalled = $true
+    }
+} catch {
+    Write-Info "FFmpeg が見つかりません。インストールします。"
+}
+
+if (-not $ffmpegInstalled) {
+    try {
+        Write-Running "FFmpeg をインストールしています..."
+        Write-Log "winget install Gyan.FFmpeg を実行します。"
+        winget install --id Gyan.FFmpeg --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object {
+            Write-Log "  winget: $_"
+        }
+        Write-Running "PATHを更新しています..."
+        Refresh-Path
+        Write-Done "FFmpeg のインストールが完了しました。"
+        Write-Log "FFmpeg インストール完了。"
+    } catch {
+        Write-Err "FFmpeg のインストールに失敗しました: $_"
+        Write-Log "FFmpeg インストールエラー: $_"
+        Confirm-Continue "FFmpeg のインストールに失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ5: Ollamaのインストール
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Ollama のインストール"
+
+$ollamaInstalled = $false
+
+try {
+    Write-Running "Ollama のバージョンを確認しています..."
+    $ov = ollama --version 2>&1
+    if ($LASTEXITCODE -eq 0 -or ($ov -match "ollama")) {
+        Write-Skip "Ollama がすでにインストールされています。"
+        Write-Log "Ollama 検出: $ov"
+        $ollamaInstalled = $true
+    }
+} catch {
+    Write-Info "Ollama が見つかりません。インストールします。"
+}
+
+if (-not $ollamaInstalled) {
+    try {
+        Write-Running "Ollama をインストールしています... (数分かかる場合があります)"
+        Write-Log "winget install Ollama.Ollama を実行します。"
+        winget install --id Ollama.Ollama --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object {
+            Write-Log "  winget: $_"
+        }
+        Write-Running "PATHを更新しています..."
+        Refresh-Path
+
+        $ollamaPaths = @(
+            "$env:LOCALAPPDATA\Programs\Ollama",
+            "C:\Program Files\Ollama",
+            "$env:ProgramFiles\Ollama"
+        )
+        foreach ($op in $ollamaPaths) {
+            if (Test-Path "$op\ollama.exe") {
+                $env:Path += ";$op"
+                Write-Log "Ollamaパス追加: $op"
+                break
+            }
+        }
+
+        Write-Done "Ollama のインストールが完了しました。"
+        Write-Log "Ollama インストール完了。"
+        $ollamaInstalled = $true
+    } catch {
+        Write-Err "Ollama のインストールに失敗しました: $_"
+        Write-Log "Ollama インストールエラー: $_"
+        Confirm-Continue "Ollama のインストールに失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+Write-Running "Ollama サービスを起動しています..."
+try {
+    $ollamaProc = Get-Process -Name "ollama" -ErrorAction SilentlyContinue
+    if ($ollamaProc) {
+        Write-Skip "Ollama サービスはすでに起動しています。"
+        Write-Log "Ollama プロセス確認済み。"
+    } else {
+        Start-Process "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop
+        Write-Info "Ollama サービスを起動しました。起動待機中 (5秒)..."
+        Write-Log "ollama serve を起動しました。"
+        Start-Sleep -Seconds 5
+        Write-Done "Ollama サービスが起動しました。"
+    }
+} catch {
+    Write-Err "Ollama サービスの起動に失敗しました: $_"
+    Write-Log "Ollama サービス起動エラー: $_"
+    Write-Info "後で手動で 'ollama serve' を実行してください。"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ6: AIモデルのダウンロード
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "AIモデル (qwen2.5:7b-instruct) のダウンロード"
+
+$modelName = "qwen2.5:7b-instruct"
+
+try {
+    Write-Running "インストール済みモデルを確認しています..."
+    $ollamaList = ollama list 2>&1
+    Write-Log "ollama list: $ollamaList"
+
+    if ($ollamaList -match [regex]::Escape($modelName)) {
+        Write-Skip "モデル '$modelName' はすでにダウンロード済みです。"
+    } else {
+        Write-Running "AIモデルをダウンロード中... (約4GB、時間がかかります)"
+        Write-Host "  ※ ダウンロードには数分〜数十分かかる場合があります。" -ForegroundColor Yellow
+        Write-Host "  ※ このウィンドウを閉じないでください。" -ForegroundColor Yellow
+        Write-Log "ollama pull $modelName を実行します。"
+
+        $pullProc = Start-Process -FilePath "ollama" -ArgumentList "pull $modelName" -NoNewWindow -PassThru -Wait
+        if ($pullProc.ExitCode -eq 0) {
+            Write-Done "AIモデルのダウンロードが完了しました。"
+            Write-Log "モデル '$modelName' のダウンロード完了。"
+        } else {
+            throw "ollama pull が終了コード $($pullProc.ExitCode) で終了しました"
+        }
+    }
+} catch {
+    Write-Err "AIモデルのダウンロードに失敗しました: $_"
+    Write-Log "モデルダウンロードエラー: $_"
+    Write-Info "後で手動で 'ollama pull $modelName' を実行してください。"
+    Confirm-Continue "AIモデルのダウンロードに失敗しました。続行しますか？ (Y/N)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ7: Python仮想環境の作成とパッケージインストール
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Python仮想環境の作成とパッケージインストール"
+
+Set-Location $ScriptDir
+$venvPath   = Join-Path $ScriptDir "venv"
+$venvPython = Join-Path $venvPath "Scripts\python.exe"
+$venvPip    = Join-Path $venvPath "Scripts\pip.exe"
+
+if (Test-Path $venvPython) {
+    Write-Skip "仮想環境はすでに存在します。"
+    Write-Log "仮想環境確認済み: $venvPath"
+} else {
+    try {
+        Write-Running "Python仮想環境を作成しています..."
+        Write-Log "python -m venv $venvPath を実行します。"
+        & $pythonExe -m venv $venvPath 2>&1 | ForEach-Object { Write-Log "  venv: $_" }
+        if (Test-Path $venvPython) {
+            Write-Done "仮想環境を作成しました: $venvPath"
+        } else {
+            throw "仮想環境の作成に失敗しました"
+        }
+    } catch {
+        Write-Err "仮想環境の作成に失敗しました: $_"
+        Write-Log "仮想環境作成エラー: $_"
+        Confirm-Continue "仮想環境の作成に失敗しました。続行しますか？ (Y/N)"
+    }
+}
+
+try {
+    Write-Running "pip をアップグレードしています..."
+    & $venvPython -m pip install --upgrade pip 2>&1 | ForEach-Object { Write-Log "  pip upgrade: $_" }
+    Write-Done "pip のアップグレードが完了しました。"
+} catch {
+    Write-Err "pip のアップグレードに失敗しました: $_"
+    Write-Log "pip アップグレードエラー: $_"
+}
+
+try {
+    Write-Running "PyTorch (CUDA版) をインストールしています... (約2GB、時間がかかります)"
+    Write-Host "  ※ CUDA 12.1対応版をインストールします。" -ForegroundColor Yellow
+    Write-Host "  ※ このウィンドウを閉じないでください。" -ForegroundColor Yellow
+    Write-Log "PyTorch CUDA版インストールを開始します。"
+
+    & $venvPip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 2>&1 | ForEach-Object {
+        Write-Log "  torch: $_"
+        if ($_ -match "Downloading|Installing|Successfully") {
+            Write-Host "    $_" -ForegroundColor DarkGray
+        }
+    }
+    Write-Done "PyTorch (CUDA版) のインストールが完了しました。"
+    Write-Log "PyTorch インストール完了。"
+} catch {
+    Write-Err "PyTorch のインストールに失敗しました: $_"
+    Write-Log "PyTorch インストールエラー: $_"
+    Confirm-Continue "PyTorch のインストールに失敗しました。続行しますか？ (Y/N)"
+}
+
+$reqFile = Join-Path $ScriptDir "requirements.txt"
+if (Test-Path $reqFile) {
+    try {
+        Write-Running "requirements.txt からパッケージをインストールしています..."
+        Write-Log "pip install -r $reqFile を実行します。"
+        & $venvPip install -r $reqFile 2>&1 | ForEach-Object {
+            Write-Log "  pip: $_"
+            if ($_ -match "Successfully installed|Requirement already satisfied|Downloading|Installing") {
+                Write-Host "    $_" -ForegroundColor DarkGray
+            }
+        }
+        Write-Done "パッケージのインストールが完了しました。"
+        Write-Log "requirements.txt インストール完了。"
+    } catch {
+        Write-Err "パッケージのインストールに失敗しました: $_"
+        Write-Log "パッケージインストールエラー: $_"
+        Confirm-Continue "パッケージのインストールに失敗しました。続行しますか？ (Y/N)"
+    }
+} else {
+    Write-Err "requirements.txt が見つかりません: $reqFile"
+    Write-Log "requirements.txt が見つかりません。"
+    Confirm-Continue "requirements.txt が見つかりません。続行しますか？ (Y/N)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ8: .envファイルの対話的設定
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "Discord Bot の設定 (.envファイルの作成)"
+
+$envFile     = Join-Path $ScriptDir ".env"
+$doCreateEnv = $true
+
+if (Test-Path $envFile) {
+    Write-Host ""
+    Write-Host "  .env ファイルがすでに存在します。" -ForegroundColor Yellow
+    $ow = Read-Host "  上書きしますか？ (Y/N) [N でスキップ]"
+    if ($ow -notmatch '^[Yy]') {
+        Write-Skip ".env ファイルの設定をスキップします。"
+        Write-Log ".env ファイルは既存のものを使用します。"
+        $doCreateEnv = $false
+    }
+}
+
+if ($doCreateEnv) {
+    Write-Host ""
+    Write-Host "  Discord Bot の設定を行います。" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  【Discord Bot トークンの取得方法】" -ForegroundColor Cyan
+    Write-Host "  1. https://discord.com/developers/applications を開く" -ForegroundColor White
+    Write-Host "  2. New Application でアプリを作成" -ForegroundColor White
+    Write-Host "  3. 左メニューの Bot をクリック" -ForegroundColor White
+    Write-Host "  4. Reset Token でトークンを取得" -ForegroundColor White
+    Write-Host "  5. MESSAGE CONTENT INTENT を有効にする" -ForegroundColor White
+    Write-Host ""
+
+    $ob = Read-Host "  Discord Developer Portal を今すぐ開きますか？ (Y/N)"
+    if ($ob -match '^[Yy]') {
+        Start-Process "https://discord.com/developers/applications"
+        Write-Host "  ブラウザを開きました。トークンを取得してからここに戻ってください。" -ForegroundColor Green
+        Write-Host ""
+        Read-Host "  準備ができたら Enter キーを押してください"
+    }
+
+    Write-Host ""
+    $token = ""
+    while ($token -eq "") {
+        $token = Read-Host "  Discord Bot トークンを入力してください"
+        if ($token -eq "") {
+            Write-Host "  トークンを入力してください。" -ForegroundColor Red
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  【テキストチャンネルIDの取得方法】" -ForegroundColor Cyan
+    Write-Host "  1. Discordの設定 → 詳細設定 → 開発者モード をON" -ForegroundColor White
+    Write-Host "  2. 翻訳結果を送信したいテキストチャンネルを右クリック" -ForegroundColor White
+    Write-Host "  3. チャンネルIDをコピー を選択" -ForegroundColor White
+    Write-Host ""
+
+    $channelId = ""
+    while ($channelId -eq "") {
+        $channelId = Read-Host "  テキストチャンネルID を入力してください"
+        if ($channelId -eq "") {
+            Write-Host "  チャンネルIDを入力してください。" -ForegroundColor Red
+        }
+    }
+
+    # .envファイルを配列で生成（ヒアストリング不使用）
+    $envLines = @(
+        "# AutoTrans Bot - 環境変数設定ファイル",
+        "# setup.ps1 により自動生成されました",
+        "",
+        "# 必須設定",
+        "",
+        "# Discord Botトークン",
+        "DISCORD_TOKEN=$token",
+        "",
+        "# 翻訳結果を送信するテキストチャンネルのID",
+        "TEXT_CHANNEL_ID=$channelId",
+        "",
+        "# オプション設定（デフォルト値で動作します）",
+        "",
+        "# OllamaサーバーのURL",
+        "OLLAMA_BASE_URL=http://localhost:11434",
+        "",
+        "# 使用するOllamaモデル",
+        "OLLAMA_MODEL=qwen2.5:7b-instruct",
+        "",
+        "# 使用するWhisperモデル",
+        "WHISPER_MODEL=large-v3-turbo",
+        "",
+        "# VAD無音検知閾値（ミリ秒）",
+        "VAD_SILENCE_THRESHOLD_MS=400",
+        "",
+        "# VAD発話判定閾値（0.0〜1.0）",
+        "VAD_THRESHOLD=0.5"
+    )
+
+    try {
+        $envLines | Set-Content -Path $envFile -Encoding UTF8
+        Write-Done ".env ファイルを作成しました: $envFile"
+        Write-Log ".env ファイルを作成しました。"
+    } catch {
+        Write-Err ".env ファイルの作成に失敗しました: $_"
+        Write-Log ".env ファイル作成エラー: $_"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ9: デスクトップショートカットの作成
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "デスクトップショートカットの作成"
+
+try {
+    $desktopPath  = [System.Environment]::GetFolderPath("Desktop")
+    $shortcutPath = Join-Path $desktopPath "AutoTrans Bot 起動.lnk"
+    $targetBat    = Join-Path $ScriptDir "start_bot.bat"
+
+    Write-Running "デスクトップにショートカットを作成しています..."
+
+    $wsh      = New-Object -ComObject WScript.Shell
+    $lnk      = $wsh.CreateShortcut($shortcutPath)
+    $lnk.TargetPath       = $targetBat
+    $lnk.WorkingDirectory = $ScriptDir
+    $lnk.Description      = "AutoTrans Discord翻訳Bot を起動します"
+    $lnk.WindowStyle      = 1
+
+    $psIcon = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (Test-Path $psIcon) {
+        $lnk.IconLocation = $psIcon + ",0"
+    }
+
+    $lnk.Save()
+    Write-Done "ショートカットを作成しました: $shortcutPath"
+    Write-Log "ショートカット作成完了: $shortcutPath"
+} catch {
+    Write-Err "ショートカットの作成に失敗しました: $_"
+    Write-Log "ショートカット作成エラー: $_"
+    Write-Info "手動で start_bot.bat のショートカットをデスクトップに作成してください。"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ステップ10: 完了メッセージ
+# ─────────────────────────────────────────────────────────────────────────────
+Write-StepHeader "セットアップ完了"
+
+Write-Host ""
+if ($script:ErrorCount -eq 0) {
+    Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
+    Write-Host "║         セットアップが完了しました！                  ║" -ForegroundColor Green
+    Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+} else {
+    Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+    Write-Host "║   セットアップが完了しました（エラーあり）             ║" -ForegroundColor Yellow
+    Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+    Write-Host ""
+    $ec = $script:ErrorCount
+    Write-Host "  $ec 件のエラーが発生しました。" -ForegroundColor Yellow
+    Write-Host "  詳細は setup_log.txt を確認してください。" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "  次のステップ：" -ForegroundColor White
+Write-Host ""
+Write-Host "  1. デスクトップの AutoTrans Bot 起動 をダブルクリック" -ForegroundColor Cyan
+Write-Host "     または start_bot.bat を実行してBotを起動" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  2. Discordで /join コマンドを実行して" -ForegroundColor Cyan
+Write-Host "     BotをボイスチャンネルにJoinさせる" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  3. 日本語または韓国語で話すと自動翻訳されます！" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  -----------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  用語を追加したい場合は dictionary.json を編集し、" -ForegroundColor Gray
+Write-Host "  Discordで /reload_dict コマンドを実行してください。" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  何かお困りの場合は SETUP.md を参照してください。" -ForegroundColor Gray
+Write-Host "  -----------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+
+$et = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$ec2 = $script:ErrorCount
+Write-Log "セットアップ完了。終了時刻: $et。エラー数: $ec2"
+
+Write-Host "  Enterキーを押して終了します..." -ForegroundColor DarkGray
+Read-Host | Out-Null
