@@ -201,7 +201,7 @@ class VADSink(discord.sinks.Sink):
 
     def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         super().__init__(filters=None)
-        self.client = None  # VoiceClientへの参照（start_recording後に手動設定）
+        self.vc = None  # VoiceClientへの参照（start_recording後に手動設定）
         self.queue = queue
         self.loop = loop
 
@@ -799,8 +799,8 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
         sink,
         finished_callback,
     )
-    # reader.py の self.sink._client = client がコメントアウトされているため手動設定
-    sink.client = voice_client
+    # Sink.client は読み取り専用プロパティ（self.vc を返す）のため、内部変数を直接設定
+    sink.vc = voice_client
 
     logger.info(
         "音声受信開始 | guild=%s | channel=%s",
