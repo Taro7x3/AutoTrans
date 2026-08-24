@@ -45,6 +45,23 @@ _log = logging.getLogger(__name__)
 # パッチ適用
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 診断カウンター（INFOレベルで定期的に状態を報告するため）
+# ─────────────────────────────────────────────────────────────────────────────
+_diag_counters: dict = {
+    "total": 0,
+    "dave_skipped_no_session": 0,
+    "dave_skipped_no_user": 0,
+    "dave_skipped_no_passthrough": 0,
+    "dave_decrypt_ok": 0,
+    "dave_decrypt_fail": 0,
+    "opus_ok": 0,
+    "opus_fail": 0,
+    "write_called": 0,
+}
+_DIAG_REPORT_INTERVAL = 50  # 50パケットごとにINFOログで状態を報告
+
+
 def _patched_decode_packet(self, packet):
     """
     PacketDecoder._decode_packet() のパッチ版。
@@ -55,6 +72,10 @@ def _patched_decode_packet(self, packet):
       - DAVEセッションが存在しない、または can_passthrough が False の場合は
         元の動作と同じ（Opusデコードのみ）。
       - DAVE復号に失敗した場合は元のデータでOpusデコードを試みる（フォールバック）。
+
+    診断ログ:
+      - 50パケットごとにINFOレベルで処理統計を出力する。
+      - これにより、DAVEセッション状態・can_passthrough状態・Opusデコード成否を確認できる。
     """
     import davey as _davey
     from discord.opus import HAS_DAVEY
@@ -65,6 +86,10 @@ def _patched_decode_packet(self, packet):
     user_id = self._cached_id
     dave = self.sink.client._connection.dave_session
     in_dave = dave is not None
+
+    # ── 診断カウンター更新 ──
+    _diag_counters["total"] += 1
+    total = _diag_counters["total"]
 
     _log.debug(
         "[DAVE patch] Decoding packet for user %s (DAVE enabled: %s, HAS_DAVEY: %s). "
@@ -77,29 +102,39 @@ def _patched_decode_packet(self, packet):
 
     # ── Step 1: DAVE復号（Opusデコードの前に実行） ──
     # DAVEセッションが存在し、ユーザーが can_passthrough の場合のみ実行
+    dave_decrypt_applied = False
     if HAS_DAVEY and in_dave and user_id is not None:
         try:
-            if dave.can_passthrough(user_id):
+            can_pt = dave.can_passthrough(user_id)
+            if can_pt:
                 _log.debug(
                     "[DAVE patch] User %s can_passthrough=True, applying DAVE decrypt before Opus decode",
                     user_id,
                 )
                 decrypted = dave.decrypt(user_id, _davey.MediaType.audio, packet.decrypted_data)
                 packet.decrypted_data = decrypted
+                dave_decrypt_applied = True
+                _diag_counters["dave_decrypt_ok"] += 1
                 _log.debug("[DAVE patch] DAVE decrypt succeeded for user %s", user_id)
             else:
+                _diag_counters["dave_skipped_no_passthrough"] += 1
                 _log.debug(
                     "[DAVE patch] User %s can_passthrough=False, skipping DAVE decrypt "
                     "(DAVE negotiation may still be in progress)",
                     user_id,
                 )
         except Exception as exc:
+            _diag_counters["dave_decrypt_fail"] += 1
             _log.debug(
                 "[DAVE patch] DAVE decrypt failed for user %s (falling back to raw data): %s",
                 user_id,
                 exc,
             )
             # DAVE復号失敗時はフォールバック（元のデータでOpusデコードを試みる）
+    elif not in_dave:
+        _diag_counters["dave_skipped_no_session"] += 1
+    elif user_id is None:
+        _diag_counters["dave_skipped_no_user"] += 1
 
     # ── Step 2: Opusデコード ──
     other_code = True
@@ -109,10 +144,14 @@ def _patched_decode_packet(self, packet):
         other_code = False
         try:
             pcm = self._decoder.decode(packet.decrypted_data, fec=False)
+            _diag_counters["opus_ok"] += 1
         except Exception as exc:
+            _diag_counters["opus_fail"] += 1
             _log.debug(
-                "[DAVE patch] Opus decode failed for user %s (DAVE negotiation may be incomplete): %s",
+                "[DAVE patch] Opus decode failed for user %s "
+                "(dave_applied=%s, DAVE negotiation may be incomplete): %s",
                 user_id,
+                dave_decrypt_applied,
                 exc,
             )
             # Opusデコード失敗時は無音PCMを返す（エラーを上位に伝播させない）
@@ -132,15 +171,43 @@ def _patched_decode_packet(self, packet):
             )
             try:
                 pcm = self._decoder.decode(nextdata, fec=True)
+                _diag_counters["opus_ok"] += 1
             except Exception as exc:
+                _diag_counters["opus_fail"] += 1
                 _log.debug("[DAVE patch] FEC decode failed: %s", exc)
                 pcm = b"\x00" * 3840
         else:
             try:
                 pcm = self._decoder.decode(None, fec=False)
+                _diag_counters["opus_ok"] += 1
             except Exception as exc:
+                _diag_counters["opus_fail"] += 1
                 _log.debug("[DAVE patch] FEC (no next packet) decode failed: %s", exc)
                 pcm = b"\x00" * 3840
+
+    # ── 定期診断レポート（50パケットごと） ──
+    if total % _DIAG_REPORT_INTERVAL == 0:
+        opus_total = _diag_counters["opus_ok"] + _diag_counters["opus_fail"]
+        opus_fail_rate = (
+            _diag_counters["opus_fail"] / opus_total * 100 if opus_total > 0 else 0
+        )
+        _log.info(
+            "[DAVE patch 診断] パケット数=%d | "
+            "DAVEセッションなし=%d | ユーザーIDなし=%d | can_passthrough=False=%d | "
+            "DAVE復号成功=%d | DAVE復号失敗=%d | "
+            "Opusデコード成功=%d | Opusデコード失敗=%d (失敗率=%.1f%%) | "
+            "write()呼び出し=%d",
+            total,
+            _diag_counters["dave_skipped_no_session"],
+            _diag_counters["dave_skipped_no_user"],
+            _diag_counters["dave_skipped_no_passthrough"],
+            _diag_counters["dave_decrypt_ok"],
+            _diag_counters["dave_decrypt_fail"],
+            _diag_counters["opus_ok"],
+            _diag_counters["opus_fail"],
+            opus_fail_rate,
+            _diag_counters["write_called"],
+        )
 
     return packet, pcm
 

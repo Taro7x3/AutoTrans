@@ -247,6 +247,35 @@ class VADSink(discord.sinks.Sink):
             data: 受信した音声データ（VoiceData: .pcm に48kHz stereo 16bit PCMバイト列）
             user: 発話しているDiscordユーザー（User | Member | None）
         """
+        # ── 診断: write()呼び出しカウンター ──
+        # patches/discord_opus_dave_fix.py の _diag_counters を更新する
+        try:
+            import patches.discord_opus_dave_fix as _dave_patch
+            _dave_patch._diag_counters["write_called"] += 1
+            write_count = _dave_patch._diag_counters["write_called"]
+            # 最初の5回と、その後50回ごとにINFOログを出力
+            if write_count <= 5 or write_count % 50 == 0:
+                pcm_bytes_preview = None
+                try:
+                    pcm_bytes_preview = data.pcm
+                except Exception:
+                    pass
+                pcm_len = len(pcm_bytes_preview) if pcm_bytes_preview is not None else -1
+                is_silent = (
+                    pcm_bytes_preview == b"\x00" * len(pcm_bytes_preview)
+                    if pcm_bytes_preview and len(pcm_bytes_preview) > 0
+                    else None
+                )
+                logger.info(
+                    "[VADSink.write 診断] 呼び出し回数=%d | user=%s | pcm_len=%d | 無音=%s",
+                    write_count,
+                    getattr(user, "display_name", str(user)) if user is not None else "None",
+                    pcm_len,
+                    is_silent,
+                )
+        except Exception as _diag_exc:
+            logger.debug("[VADSink.write 診断] カウンター更新失敗: %s", _diag_exc)
+
         if vad_model is None:
             return
 
