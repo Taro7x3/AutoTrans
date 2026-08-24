@@ -851,6 +851,24 @@ if ($doCreateEnv) {
         }
     }
 
+    Write-Host ""
+    Write-Host "  【サーバー（ギルド）IDの取得方法】" -ForegroundColor Cyan
+    Write-Host "  ※ スラッシュコマンドを即時反映させるために必要です" -ForegroundColor Yellow
+    Write-Host "  1. Discordの設定 → 詳細設定 → 開発者モード をON（上記と同じ）" -ForegroundColor White
+    Write-Host "  2. Botを招待したサーバーのサーバー名（左サイドバー）を右クリック" -ForegroundColor White
+    Write-Host "  3. IDをコピー を選択" -ForegroundColor White
+    Write-Host "  ※ 未入力の場合はグローバルコマンドとして登録（反映に最大1時間かかります）" -ForegroundColor Gray
+    Write-Host ""
+
+    $guildId = Read-Host "  サーバーID を入力してください（スキップする場合はEnterキー）"
+    if ($guildId -eq "") {
+        Write-Host "  サーバーIDをスキップしました。スラッシュコマンドの反映に最大1時間かかる場合があります。" -ForegroundColor Yellow
+        Write-Log "GUILD_ID 未入力。グローバルコマンドとして登録されます。"
+    } else {
+        Write-Done "サーバーID を設定しました: $guildId"
+        Write-Log "GUILD_ID 設定済み: $guildId"
+    }
+
     # .envファイルを配列で生成（ヒアストリング不使用）
     $envLines = @(
         "# AutoTrans Bot - 環境変数設定ファイル",
@@ -863,6 +881,10 @@ if ($doCreateEnv) {
         "",
         "# 翻訳結果を送信するテキストチャンネルのID",
         "TEXT_CHANNEL_ID=$channelId",
+        "",
+        "# スラッシュコマンドを即時反映させるサーバーのID（推奨）",
+        "# サーバー名を右クリック→「IDをコピー」で取得",
+        "GUILD_ID=$guildId",
         "",
         "# オプション設定（デフォルト値で動作します）",
         "",

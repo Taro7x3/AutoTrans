@@ -47,6 +47,7 @@ logger = logging.getLogger("AutoTrans")
 # ─────────────────────────────────────────────
 DISCORD_TOKEN: str = os.environ["DISCORD_TOKEN"]
 TEXT_CHANNEL_ID: int = int(os.environ["TEXT_CHANNEL_ID"])
+GUILD_ID: int = int(os.getenv("GUILD_ID", "0"))
 
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
@@ -623,16 +624,34 @@ async def on_ready() -> None:
     global DICTIONARY
     DICTIONARY = load_dictionary()
 
-    # 翻訳ワーカータスクを起動
+    # 翻訳ワーカータスクを起動（既に起動済みの場合はスキップ）
     global worker_task
-    worker_task = asyncio.create_task(
-        translation_worker(audio_queue, bot),
-        name="translation_worker",
-    )
-    logger.info("翻訳ワーカータスク起動完了")
+    if worker_task is None or worker_task.done():
+        worker_task = asyncio.create_task(
+            translation_worker(audio_queue, bot),
+            name="translation_worker",
+        )
+        logger.info("翻訳ワーカータスク起動完了")
+    else:
+        logger.info("翻訳ワーカータスクは既に起動中です（スキップ）")
+
+    # スラッシュコマンドを同期（guild_ids未指定の場合のフォールバック）
+    if not GUILD_ID:
+        try:
+            await bot.sync_commands()
+            logger.info("スラッシュコマンドの同期完了（グローバル）")
+        except Exception as e:
+            logger.warning("スラッシュコマンドの同期に失敗しました: %s", e)
 
 
-@bot.slash_command(name="reload_dict", description="用語辞書を再読み込みします")
+_GUILD_IDS = [GUILD_ID] if GUILD_ID else None
+
+
+@bot.slash_command(
+    name="reload_dict",
+    description="用語辞書を再読み込みします",
+    guild_ids=_GUILD_IDS,
+)
 async def reload_dict(ctx: discord.ApplicationContext) -> None:
     """
     /reload_dict コマンド:
@@ -657,7 +676,11 @@ async def reload_dict(ctx: discord.ApplicationContext) -> None:
         )
 
 
-@bot.slash_command(name="join", description="BotをVCに参加させて翻訳を開始します")
+@bot.slash_command(
+    name="join",
+    description="BotをVCに参加させて翻訳を開始します",
+    guild_ids=_GUILD_IDS,
+)
 async def join_command(ctx: discord.ApplicationContext) -> None:
     """
     /join コマンド:
@@ -738,7 +761,11 @@ async def finished_callback(
     sink.cleanup()
 
 
-@bot.slash_command(name="leave", description="BotをVCから退出させて翻訳を停止します")
+@bot.slash_command(
+    name="leave",
+    description="BotをVCから退出させて翻訳を停止します",
+    guild_ids=_GUILD_IDS,
+)
 async def leave_command(ctx: discord.ApplicationContext) -> None:
     """
     /leave コマンド:
@@ -843,7 +870,7 @@ def initialize_whisper_model() -> WhisperModel:
 async def main() -> None:
     """
     Botのメイン起動関数。
-    モデルの初期化 → aiohttp.ClientSession作成 → Bot起動 の順で実行する。
+    モデルの初期化（非同期） → aiohttp.ClientSession作成 → Bot起動 の順で実行する。
     """
     global vad_model, whisper_model, http_session
 
@@ -851,16 +878,18 @@ async def main() -> None:
     logger.info("AutoTrans Bot 起動中...")
     logger.info("=" * 60)
 
-    # ── Silero VADモデルの初期化 ──
+    # ── Silero VADモデルの初期化（asyncio.to_thread()でイベントループをブロックしない） ──
     try:
-        vad_model = initialize_vad_model()
+        logger.info("Silero VADモデルをバックグラウンドスレッドでロード中...")
+        vad_model = await asyncio.to_thread(initialize_vad_model)
     except Exception as e:
         logger.critical("Silero VADモデルの初期化に失敗しました: %s", e, exc_info=True)
         raise
 
-    # ── faster-whisperモデルの初期化 ──
+    # ── faster-whisperモデルの初期化（asyncio.to_thread()でイベントループをブロックしない） ──
     try:
-        whisper_model = initialize_whisper_model()
+        logger.info("faster-whisperモデルをバックグラウンドスレッドでロード中...")
+        whisper_model = await asyncio.to_thread(initialize_whisper_model)
     except Exception as e:
         logger.critical("faster-whisperモデルの初期化に失敗しました: %s", e, exc_info=True)
         raise
