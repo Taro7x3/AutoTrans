@@ -62,8 +62,9 @@ OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 
 # VAD設定
-VAD_SILENCE_THRESHOLD_MS: int = int(os.getenv("VAD_SILENCE_THRESHOLD_MS", "400"))
+VAD_SILENCE_THRESHOLD_MS: int = int(os.getenv("VAD_SILENCE_THRESHOLD_MS", "1000")) # 1000ms推奨
 VAD_THRESHOLD: float = float(os.getenv("VAD_THRESHOLD", "0.5"))
+MIN_SPEECH_DURATION_SEC: float = 0.6  # 0.6秒未満のノイズ・破片はSTTに回さない
 
 # py-cordから受信する音声フォーマット
 DISCORD_SAMPLE_RATE: int = 48000   # 48kHz
@@ -347,22 +348,31 @@ class VADSink(discord.sinks.Sink):
                         # ── Step 4: 発話終了を検出 → Queueに投入 ──
                         if state["buffer"]:
                             audio_data = np.concatenate(state["buffer"])
-                            payload = {
-                                "user_id": user_id,
-                                "display_name": state["display_name"],
-                                "audio_data": audio_data.tobytes(),
-                                "sample_rate": VAD_SAMPLE_RATE,
-                            }
-                            # スレッドセーフにQueueへ投入
-                            asyncio.run_coroutine_threadsafe(
-                                self.queue.put(payload),
-                                self.loop,
-                            )
-                            logger.debug(
-                                "発話終了検出 → Queue投入 | user=%s | 音声長=%.2fs",
-                                state["display_name"],
-                                len(audio_data) / VAD_SAMPLE_RATE,
-                            )
+                            duration_sec = len(audio_data) / VAD_SAMPLE_RATE
+
+                            # 極端に短い音声（咳払い・息・ノイズ）を無視する
+                            if duration_sec >= MIN_SPEECH_DURATION_SEC:
+                                payload = {
+                                    "user_id": user_id,
+                                    "display_name": state["display_name"],
+                                    "audio_data": audio_data.tobytes(),
+                                    "sample_rate": VAD_SAMPLE_RATE,
+                                }
+                                asyncio.run_coroutine_threadsafe(
+                                    self.queue.put(payload),
+                                    self.loop,
+                                )
+                                logger.info(
+                                    "発話終了検出 → Queue投入 | user=%s | 音声長=%.2fs",
+                                    state["display_name"],
+                                    duration_sec,
+                                )
+                            else:
+                                logger.debug(
+                                    "短すぎる音声を無視 | user=%s | 音声長=%.2fs",
+                                    state["display_name"],
+                                    duration_sec,
+                                )
 
                         # バッファと状態をリセット
                         state["buffer"] = []
@@ -474,18 +484,30 @@ def transcribe_audio(audio_bytes: bytes, sample_rate: int) -> tuple[str, str]:
     audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
 
     # faster-whisperで文字起こし
-    # language=None で自動検出
     segments, info = whisper_model.transcribe(
         audio_array,
-        language=None,          # 言語自動検出
+        language=None,          # 日韓両対応のため自動検出
         beam_size=5,
-        vad_filter=False,       # VADはSileroで既に実施済み
+        vad_filter=False,       # Sileroで実施済み
         word_timestamps=False,
+        temperature=0.0,        # 決定論的にしてハルシネーションを抑制
+        condition_on_previous_text=False, # 直前の幻覚を引きずらない
+        no_speech_threshold=0.6,          # 声が入っていない場合の幻覚を防止
+        # Whisperに日韓の会話コンテキストをプロンプトとして渡す（言語判定精度が劇的に向上）
+        initial_prompt="日本語と韓国語の会話です。オーバーウォッチのVCコール。안녕하세요, 반갑습니다.",
     )
 
     # セグメントを結合してテキストを生成
     text = " ".join(seg.text.strip() for seg in segments).strip()
     detected_lang = info.language  # 例: "ja", "ko", "en"
+
+    # 確信度が低すぎる場合や英語・他言語に誤判定された場合のフォールバック（任意）
+    if detected_lang not in ("ja", "ko") and info.language_probability < 0.6:
+        logger.warning(
+            "言語判定が低確信度 (%s: %.2f) のためスキップまたは注意",
+            detected_lang,
+            info.language_probability,
+        )
 
     return text, detected_lang
 
