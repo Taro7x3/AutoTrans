@@ -788,6 +788,28 @@ if (Test-Path $reqFile) {
     Confirm-Continue "requirements.txt が見つかりません。続行しますか？ (Y/N)"
 }
 
+# py-cord master ブランチのインストール（DAVE / 音声受信対応）
+# requirements.txt に git+URL 指定が含まれているが、念のため明示的に再インストールする
+Write-Running "py-cord master ブランチをインストールしています (DAVE対応)..."
+Write-Log "py-cord master ブランチのインストールを開始します。"
+& "$InstallDir\venv\Scripts\pip.exe" install `
+    "py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@master" `
+    --no-cache-dir 2>&1 | ForEach-Object {
+    Write-Log "  py-cord: $_"
+    if ($_ -match "Successfully installed|Requirement already satisfied|Downloading|Installing") {
+        Write-Host "    $_" -ForegroundColor DarkGray
+    }
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [警告] py-cord master ブランチのインストールに失敗しました" -ForegroundColor Yellow
+    Write-Host "  Bot起動時に自動的に再インストールを試みます" -ForegroundColor Yellow
+    Write-Log "[警告] py-cord master ブランチのインストールに失敗しました"
+    $script:ErrorCount++
+} else {
+    Write-Done "py-cord master ブランチのインストールが完了しました (DAVE対応)"
+    Write-Log "py-cord master ブランチのインストール完了。"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ステップ10: .envファイルの対話的設定
 # ─────────────────────────────────────────────────────────────────────────────

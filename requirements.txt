@@ -2,7 +2,9 @@
 # Note: torch and torchaudio must be installed separately:
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-py-cord[voice]>=2.6.0
+# py-cord master branch (DAVE / voice reception support)
+# The 'dave' branch does not exist; master branch includes davey/DAVE support.
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@master
 faster-whisper>=1.0.0
 aiohttp>=3.9.0
 python-dotenv>=1.0.0

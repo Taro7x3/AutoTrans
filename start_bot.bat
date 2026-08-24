@@ -52,6 +52,13 @@ if errorlevel 1 (
 
 echo.
 
+:: Check and install py-cord master branch (DAVE / voice reception support)
+echo [INFO] Checking py-cord master branch...
+"%BOT_DIR%venv\Scripts\pip.exe" install "py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@master" --quiet --no-cache-dir
+if errorlevel 1 (
+    echo [WARN] py-cord master branch install failed. Continuing with existing version.
+)
+
 :: Check and install PyTorch if missing
 echo [INFO] Checking PyTorch installation...
 "%BOT_DIR%venv\Scripts\python.exe" -c "import torch" >nul 2>&1

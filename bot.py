@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 if TYPE_CHECKING:
     from discord.voice import VoiceData
@@ -188,7 +188,16 @@ class VADSink(discord.sinks.Sink):
     音声フォーマット変換:
       Discord受信: 48kHz, stereo, 16bit PCM
       → Silero VAD入力: 16kHz, mono, float32
+
+    py-cord master (DAVE対応) ブランチでは voice/receive/router.py の
+    SinkEventRouter が __sink_listeners__ と walk_children() を参照するため、
+    これらをクラス変数・メソッドとして定義する必要がある。
     """
+
+    # py-cord master の SinkEventRouter が参照するクラス変数。
+    # 形式: list[tuple[event_name, method_name]]
+    # イベントリスナーを登録しない場合は空リストでよい。
+    __sink_listeners__: ClassVar[list[tuple[str, str]]] = []
 
     def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         super().__init__(filters=None)
@@ -336,8 +345,15 @@ class VADSink(discord.sinks.Sink):
         self._user_states.clear()
         logger.info("VADSinkクリーンアップ完了")
 
+    def walk_children(self):
+        """
+        py-cord master の SinkEventRouter が参照するメソッド。
+        子Sinkが存在しない場合は空のイテレータを返す。
+        """
+        return iter([])
+
     def is_opus(self) -> bool:
-        """OpusではなくPCMデータを受け取る（py-cord 2.8.1 API）"""
+        """OpusではなくPCMデータを受け取る（py-cord master API）"""
         return False
 
 
