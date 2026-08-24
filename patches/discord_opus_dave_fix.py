@@ -84,6 +84,8 @@ def _patched_decrypt_rtp(self, packet):
         （オリジナルは dave.ready=True の場合のみDAVE復号を実行する）
       - DAVE復号に失敗した場合は OPUS_SILENCE にフォールバック。
       - dave_session が None の場合は元の動作と同じ（NaCl復号のみ）。
+      - can_passthrough=True のユーザーは DAVE 暗号化なしで送信しているため
+        DAVE復号をスキップする（オリジナルの decrypt_rtp() と同じ動作）。
 
     診断ログ:
       - 50パケットごとにINFOレベルで処理統計を出力する。
@@ -103,6 +105,37 @@ def _patched_decrypt_rtp(self, packet):
     if dave is not None:
         uid = state.ssrc_user_map.get(packet.ssrc)
         if uid:
+            # can_passthrough=True のユーザーは DAVE 暗号化なしで送信しているため
+            # DAVE復号をスキップする。スキップしないと Opus データを破壊する。
+            # オリジナルの decrypt_rtp() は can_passthrough チェックをしていないが、
+            # _decode_packet() で can_passthrough チェックをしている。
+            # パッチは _decode_packet() も置き換えているため、ここでチェックする。
+            if dave.can_passthrough(uid):
+                _log.debug(
+                    "[DAVE patch decrypt_rtp] uid=%s can_passthrough, skipping DAVE decrypt",
+                    uid,
+                )
+                # パススルーユーザー: NaCl復号済みデータをそのまま使用
+                if packet.extended:
+                    offset = packet.update_extended_header(raw_payload)
+                    packet.decrypted_data = raw_payload[offset:]
+                else:
+                    packet.decrypted_data = raw_payload
+                # 定期診断レポート
+                if total % _DIAG_REPORT_INTERVAL == 0:
+                    _log.info(
+                        "[DAVE patch decrypt_rtp 診断] パケット数=%d | "
+                        "DAVEセッションなし=%d | uid不明=%d | dave.ready=False時の試行=%d | "
+                        "DAVE復号成功=%d | DAVE復号失敗=%d",
+                        total,
+                        _diag_counters["decrypt_rtp_dave_skipped_no_session"],
+                        _diag_counters["decrypt_rtp_dave_skipped_no_uid"],
+                        _diag_counters["decrypt_rtp_dave_ready_false"],
+                        _diag_counters["decrypt_rtp_dave_ok"],
+                        _diag_counters["decrypt_rtp_dave_fail"],
+                    )
+                return packet.decrypted_data
+
             if not dave.ready:
                 # dave.ready=False: MLS鍵交換が未完了
                 # オリジナルはここでスキップするが、パッチでは復号を試みる
@@ -153,7 +186,6 @@ def _patched_decrypt_rtp(self, packet):
                 packet.ssrc,
             )
             # uid が不明な場合: NaCl復号済みデータをそのまま使用
-            # extended header の処理
             if packet.extended:
                 offset = packet.update_extended_header(raw_payload)
                 packet.decrypted_data = raw_payload[offset:]
