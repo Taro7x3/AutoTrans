@@ -168,11 +168,12 @@ def build_system_prompt(direction: str, dictionary: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# グローバルモデルインスタンス（起動時に初期化）
+# グローバルモデルインスタンス（on_ready内で初期化）
 # ─────────────────────────────────────────────
 vad_model: Optional[torch.nn.Module] = None
 whisper_model: Optional[WhisperModel] = None
 http_session: Optional[aiohttp.ClientSession] = None
+models_loaded: bool = False  # on_ready再呼び出し時の二重ロード防止フラグ
 
 
 # ─────────────────────────────────────────────
@@ -616,16 +617,62 @@ worker_task: Optional[asyncio.Task] = None
 
 @bot.event
 async def on_ready() -> None:
-    """Bot起動時のイベントハンドラ"""
+    """Bot起動時のイベントハンドラ（再接続時にも呼ばれる）"""
+    global vad_model, whisper_model, http_session, models_loaded, DICTIONARY, worker_task
+
     logger.info("Bot起動完了 | ユーザー名: %s | ID: %d", bot.user.name, bot.user.id)
     logger.info("接続サーバー数: %d", len(bot.guilds))
 
     # 用語辞書の読み込み
-    global DICTIONARY
     DICTIONARY = load_dictionary()
 
+    # ── モデルロード（二重ロード防止） ──
+    if not models_loaded:
+        models_loaded = True
+
+        logger.info("=" * 60)
+        logger.info("AutoTrans Bot 初期化中...")
+        logger.info("=" * 60)
+
+        # Silero VADモデルの初期化（asyncio.to_thread()でイベントループをブロックしない）
+        try:
+            logger.info("Silero VADモデルをバックグラウンドスレッドでロード中...")
+            vad_model = await asyncio.to_thread(initialize_vad_model)
+        except Exception as e:
+            logger.critical("Silero VADモデルの初期化に失敗しました: %s", e, exc_info=True)
+            models_loaded = False  # 失敗時はフラグをリセットして再試行可能にする
+            return
+
+        # faster-whisperモデルの初期化（asyncio.to_thread()でイベントループをブロックしない）
+        try:
+            logger.info("faster-whisperモデルをバックグラウンドスレッドでロード中...")
+            whisper_model = await asyncio.to_thread(initialize_whisper_model)
+        except Exception as e:
+            logger.critical("faster-whisperモデルの初期化に失敗しました: %s", e, exc_info=True)
+            models_loaded = False  # 失敗時はフラグをリセットして再試行可能にする
+            return
+
+        # aiohttp.ClientSessionの作成（Botのライフサイクル全体で使い回す）
+        connector = aiohttp.TCPConnector(limit=10)
+        http_session = aiohttp.ClientSession(connector=connector)
+        logger.info("aiohttp.ClientSession作成完了 | Ollama URL: %s", OLLAMA_BASE_URL)
+
+        # Ollama接続確認
+        try:
+            async with http_session.get(
+                f"{OLLAMA_BASE_URL}/api/tags",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    logger.info("Ollama接続確認OK | model=%s", OLLAMA_MODEL)
+                else:
+                    logger.warning("Ollama接続確認: HTTPステータス %d", resp.status)
+        except Exception as e:
+            logger.warning("Ollama接続確認失敗（起動後に再試行されます）: %s", e)
+
+        logger.info("AIモデルのロード完了")
+
     # 翻訳ワーカータスクを起動（既に起動済みの場合はスキップ）
-    global worker_task
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(
             translation_worker(audio_queue, bot),
@@ -867,85 +914,16 @@ def initialize_whisper_model() -> WhisperModel:
 # ─────────────────────────────────────────────
 # メインエントリーポイント
 # ─────────────────────────────────────────────
-async def main() -> None:
-    """
-    Botのメイン起動関数。
-    モデルの初期化（非同期） → aiohttp.ClientSession作成 → Bot起動 の順で実行する。
-    """
-    global vad_model, whisper_model, http_session
-
-    logger.info("=" * 60)
-    logger.info("AutoTrans Bot 起動中...")
-    logger.info("=" * 60)
-
-    # ── Silero VADモデルの初期化（asyncio.to_thread()でイベントループをブロックしない） ──
+# bot.run() はブロッキング呼び出し。
+# モデルロードは on_ready() 内の asyncio.to_thread() で実行されるため、
+# voice_channel.connect() と同じイベントループを使用し、
+# "attached to a different loop" エラーが発生しない。
+if __name__ == "__main__":
     try:
-        logger.info("Silero VADモデルをバックグラウンドスレッドでロード中...")
-        vad_model = await asyncio.to_thread(initialize_vad_model)
-    except Exception as e:
-        logger.critical("Silero VADモデルの初期化に失敗しました: %s", e, exc_info=True)
-        raise
-
-    # ── faster-whisperモデルの初期化（asyncio.to_thread()でイベントループをブロックしない） ──
-    try:
-        logger.info("faster-whisperモデルをバックグラウンドスレッドでロード中...")
-        whisper_model = await asyncio.to_thread(initialize_whisper_model)
-    except Exception as e:
-        logger.critical("faster-whisperモデルの初期化に失敗しました: %s", e, exc_info=True)
-        raise
-
-    # ── aiohttp.ClientSessionの作成 ──
-    # Botのライフサイクル全体で使い回す（接続プールを維持）
-    connector = aiohttp.TCPConnector(limit=10)
-    http_session = aiohttp.ClientSession(connector=connector)
-    logger.info("aiohttp.ClientSession作成完了 | Ollama URL: %s", OLLAMA_BASE_URL)
-
-    # ── Ollama接続確認 ──
-    try:
-        async with http_session.get(
-            f"{OLLAMA_BASE_URL}/api/tags",
-            timeout=aiohttp.ClientTimeout(total=5),
-        ) as resp:
-            if resp.status == 200:
-                logger.info("Ollama接続確認OK | model=%s", OLLAMA_MODEL)
-            else:
-                logger.warning("Ollama接続確認: HTTPステータス %d", resp.status)
-    except Exception as e:
-        logger.warning("Ollama接続確認失敗（起動後に再試行されます）: %s", e)
-
-    # ── Discord Botの起動 ──
-    try:
-        logger.info("Discord Botを起動します...")
-        await bot.start(DISCORD_TOKEN)
+        bot.run(DISCORD_TOKEN)
     except discord.LoginFailure as e:
         logger.critical("Discordログイン失敗（トークンを確認してください）: %s", e)
         raise
-    except Exception as e:
-        logger.critical("Bot起動中に予期しないエラー: %s", e, exc_info=True)
-        raise
-    finally:
-        # ── クリーンアップ ──
-        logger.info("クリーンアップ処理を実行中...")
-
-        # 翻訳ワーカータスクをキャンセル
-        if worker_task is not None and not worker_task.done():
-            worker_task.cancel()
-            try:
-                await worker_task
-            except asyncio.CancelledError:
-                pass
-
-        # aiohttp.ClientSessionを閉じる
-        if http_session is not None and not http_session.closed:
-            await http_session.close()
-            logger.info("aiohttp.ClientSession クローズ完了")
-
-        logger.info("AutoTrans Bot 終了")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Ctrl+C で終了しました")
     except Exception as e:
