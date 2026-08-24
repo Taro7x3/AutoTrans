@@ -658,43 +658,71 @@ try {
     Write-Log "pip アップグレードエラー: $_"
 }
 
-try {
-    Write-Running "PyTorch (CUDA版) をインストールしています... (約2GB、時間がかかります)"
-    Write-Host "  ※ CUDA 12.1対応版をインストールします。" -ForegroundColor Yellow
-    Write-Host "  ※ このウィンドウを閉じないでください。" -ForegroundColor Yellow
-    Write-Log "PyTorch CUDA版インストールを開始します。"
+# PyTorch CUDA版のインストール（最優先・単独で実行）
+Write-Log "PyTorch (CUDA 12.1対応版) をインストールしています..."
+Write-Log "※ 約2GBのダウンロードが発生します。時間がかかる場合があります..."
 
-    & $venvPip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 2>&1 | ForEach-Object {
+$torchInstalled = $false
+$torchAttempts = 0
+
+while (-not $torchInstalled -and $torchAttempts -lt 3) {
+    $torchAttempts++
+    Write-Running "PyTorchインストール試行 $torchAttempts/3..."
+    Write-Log "PyTorchインストール試行 $torchAttempts/3..."
+
+    & "$InstallDir\venv\Scripts\pip.exe" install torch torchaudio `
+        --index-url https://download.pytorch.org/whl/cu121 `
+        --no-cache-dir 2>&1 | ForEach-Object {
         Write-Log "  torch: $_"
         if ($_ -match "Downloading|Installing|Successfully") {
             Write-Host "    $_" -ForegroundColor DarkGray
         }
     }
-    Write-Done "PyTorch (CUDA版) のインストールが完了しました。"
-    Write-Log "PyTorch インストール完了。"
-} catch {
-    Write-Err "PyTorch のインストールに失敗しました: $_"
-    Write-Log "PyTorch インストールエラー: $_"
-    Confirm-Continue "PyTorch のインストールに失敗しました。続行しますか？ (Y/N)"
+
+    if ($LASTEXITCODE -eq 0) {
+        # インストール確認
+        $torchCheck = & "$InstallDir\venv\Scripts\python.exe" -c "import torch; print(torch.__version__)" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $torchInstalled = $true
+            Write-Done "PyTorch $torchCheck のインストールが完了しました"
+            Write-Log "PyTorch $torchCheck インストール確認済み。"
+        } else {
+            Write-Host "  [警告] PyTorchのインポートに失敗しました。再試行します..." -ForegroundColor Yellow
+            Write-Log "[警告] PyTorchのインポートに失敗しました。再試行します..."
+        }
+    } else {
+        Write-Host "  [警告] PyTorchのインストールに失敗しました。再試行します..." -ForegroundColor Yellow
+        Write-Log "[警告] PyTorchのインストールに失敗しました (終了コード: $LASTEXITCODE)。再試行します..."
+        Start-Sleep -Seconds 3
+    }
 }
 
+if (-not $torchInstalled) {
+    Write-Host "  [エラー] PyTorchのインストールに3回失敗しました" -ForegroundColor Red
+    Write-Log "[エラー] PyTorchのインストールに3回失敗しました"
+    Write-Host "  Bot起動時に自動的に再インストールを試みます" -ForegroundColor Yellow
+    Write-Log "Bot起動時に自動的に再インストールを試みます"
+    $script:ErrorCount++
+}
+
+# requirements.txt の残りのパッケージをインストール
 $reqFile = Join-Path $InstallDir "requirements.txt"
 if (Test-Path $reqFile) {
-    try {
-        Write-Running "requirements.txt からパッケージをインストールしています..."
-        Write-Log "pip install -r $reqFile を実行します。"
-        & $venvPip install -r $reqFile 2>&1 | ForEach-Object {
-            Write-Log "  pip: $_"
-            if ($_ -match "Successfully installed|Requirement already satisfied|Downloading|Installing") {
-                Write-Host "    $_" -ForegroundColor DarkGray
-            }
+    Write-Running "その他の依存パッケージをインストールしています..."
+    Write-Log "pip install -r $reqFile --no-cache-dir を実行します。"
+    & "$InstallDir\venv\Scripts\pip.exe" install -r $reqFile --no-cache-dir 2>&1 | ForEach-Object {
+        Write-Log "  pip: $_"
+        if ($_ -match "Successfully installed|Requirement already satisfied|Downloading|Installing") {
+            Write-Host "    $_" -ForegroundColor DarkGray
         }
-        Write-Done "パッケージのインストールが完了しました。"
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [警告] 一部のパッケージのインストールに失敗しました" -ForegroundColor Yellow
+        Write-Log "[警告] 一部のパッケージのインストールに失敗しました"
+        $script:ErrorCount++
+    } else {
+        Write-Done "依存パッケージのインストールが完了しました"
         Write-Log "requirements.txt インストール完了。"
-    } catch {
-        Write-Err "パッケージのインストールに失敗しました: $_"
-        Write-Log "パッケージインストールエラー: $_"
-        Confirm-Continue "パッケージのインストールに失敗しました。続行しますか？ (Y/N)"
     }
 } else {
     Write-Err "requirements.txt が見つかりません: $reqFile"

@@ -38,9 +38,9 @@ if not exist "%BOT_DIR%bot.py" (
     exit /b 1
 )
 
-:: Check and start Ollama service using PowerShell
+:: Check and start Ollama service using TCP port check
 echo [INFO] Checking Ollama service...
-powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:11434' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop; exit 0 } catch { exit 1 }" >nul 2>&1
+powershell.exe -NoProfile -Command "try { $tcp = New-Object System.Net.Sockets.TcpClient; $tcp.Connect('127.0.0.1', 11434); $tcp.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] Starting Ollama service...
     start "" /B ollama serve
@@ -53,6 +53,22 @@ if errorlevel 1 (
 echo.
 echo [INFO] Activating virtual environment...
 call "%BOT_DIR%venv\Scripts\activate.bat"
+
+:: Check and install PyTorch if missing
+echo [INFO] Checking PyTorch installation...
+python -c "import torch" >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] PyTorch not found. Installing PyTorch with CUDA support...
+    echo [INFO] This may take several minutes...
+    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+    if errorlevel 1 (
+        echo [ERROR] Failed to install PyTorch.
+        echo Please run manually: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        pause
+        exit /b 1
+    )
+    echo [INFO] PyTorch installed successfully.
+)
 
 echo [INFO] Starting bot...
 echo.
