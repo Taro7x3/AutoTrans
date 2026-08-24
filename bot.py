@@ -210,7 +210,7 @@ class VADSink(discord.sinks.Sink):
 
     def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         super().__init__(filters=None)
-        self.vc = None  # VoiceClientへの参照（start_recording後に手動設定）
+        self.vc = None
         self.queue = queue
         self.loop = loop
 
@@ -227,17 +227,66 @@ class VADSink(discord.sinks.Sink):
             "vad_buffer": [],
             "is_speaking": False,
             "silence_start": None,
+            "last_packet_time": time.monotonic(), # 最終パケット受信時刻
             "display_name": "Unknown",
         })
 
         # 無音判定閾値（秒）
         self._silence_threshold_sec: float = VAD_SILENCE_THRESHOLD_MS / 1000.0
 
+        # バックグラウンドで無音・パケット途絶を監視するタスクを起動
+        self._flush_task = asyncio.run_coroutine_threadsafe(
+            self._watchdog_loop(),
+            self.loop,
+        )
+
         logger.info(
             "VADSink初期化完了 | 無音閾値: %dms | VAD閾値: %.2f",
             VAD_SILENCE_THRESHOLD_MS,
             VAD_THRESHOLD,
         )
+
+    def _flush_user_buffer(self, user_id: int) -> None:
+        """指定ユーザーの音声バッファをQueueへ投入してリセットする"""
+        state = self._user_states[user_id]
+        if state["buffer"]:
+            audio_data = np.concatenate(state["buffer"])
+            duration_sec = len(audio_data) / VAD_SAMPLE_RATE
+
+            if duration_sec >= 0.5:  # 0.5秒以上の有効な音声なら投入
+                payload = {
+                    "user_id": user_id,
+                    "display_name": state["display_name"],
+                    "audio_data": audio_data.tobytes(),
+                    "sample_rate": VAD_SAMPLE_RATE,
+                }
+                asyncio.run_coroutine_threadsafe(
+                    self.queue.put(payload),
+                    self.loop,
+                )
+                logger.info(
+                    "発話終了検出（Flush） → Queue投入 | user=%s | 音声長=%.2fs",
+                    state["display_name"],
+                    duration_sec,
+                )
+            else:
+                logger.debug("短すぎる音声を破棄 | user=%s | 音声長=%.2fs", state["display_name"], duration_sec)
+
+            state["buffer"] = []
+            state["is_speaking"] = False
+            state["silence_start"] = None
+
+    async def _watchdog_loop(self) -> None:
+        """Discordのパケット送信停止（無音時）を検知して強制Flushする監視ループ"""
+        while True:
+            await asyncio.sleep(0.1) # 100msごとにチェック
+            now = time.monotonic()
+            for user_id, state in list(self._user_states.items()):
+                if state["is_speaking"]:
+                    # パケットが途絶えてから閾値以上経過した場合
+                    time_since_last_packet = now - state["last_packet_time"]
+                    if time_since_last_packet >= self._silence_threshold_sec:
+                        self._flush_user_buffer(user_id)
 
     def write(self, data: "VoiceData", user) -> None:
         """
@@ -265,6 +314,7 @@ class VADSink(discord.sinks.Sink):
         user_id = user.id
         state = self._user_states[user_id]
         state["display_name"] = getattr(user, "display_name", str(user_id))
+        state["last_packet_time"] = time.monotonic() # 受信時刻を記録
 
         # ── Step 1: 48kHz stereo 16bit PCM → 16kHz mono float32 に変換 ──
         # py-cord 2.8.1: PCMデータは data.pcm (bytes) でアクセス
@@ -345,6 +395,7 @@ class VADSink(discord.sinks.Sink):
                     elapsed_silence = time.monotonic() - state["silence_start"]
 
                     if elapsed_silence >= self._silence_threshold_sec:
+                        self._flush_user_buffer(user_id)
                         # ── Step 4: 発話終了を検出 → Queueに投入 ──
                         if state["buffer"]:
                             audio_data = np.concatenate(state["buffer"])
