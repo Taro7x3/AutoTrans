@@ -647,6 +647,10 @@ active_sinks: dict[int, VADSink] = {}
 # 翻訳ワーカータスク
 worker_task: Optional[asyncio.Task] = None
 
+# DAVEエラー後の自動再接続タスクを管理（二重起動防止）
+# key: guild_id, value: asyncio.Task
+_restart_tasks: dict[int, asyncio.Task] = {}
+
 
 @bot.event
 async def on_ready() -> None:
@@ -782,6 +786,13 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
     # 既に同じサーバーのVCに参加している場合は切断してから再接続
     if ctx.guild.voice_client is not None:
         logger.info("既存のVC接続を切断 | guild=%s", ctx.guild.name)
+
+        # 自動再接続タスクが実行中の場合はキャンセル（/join で手動再接続するため不要）
+        existing_restart = _restart_tasks.pop(ctx.guild_id, None)
+        if existing_restart is not None and not existing_restart.done():
+            existing_restart.cancel()
+            logger.info("自動再接続タスクをキャンセル | guild=%s", ctx.guild.name)
+
         if ctx.guild.voice_client.is_listening():
             ctx.guild.voice_client.stop_recording()
         await ctx.guild.voice_client.disconnect(force=True)
@@ -830,65 +841,67 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
     )
 
 
-async def _restart_recording_after_dave_error() -> None:
+async def _restart_recording_for_guild(guild_id: int) -> None:
     """
-    DAVEエラーで stop_recording() が呼ばれた後、
-    自動的に start_recording() を再試行する非同期関数。
-    finished_callback から asyncio.run_coroutine_threadsafe() 経由で呼ばれる。
+    指定ギルドの音声受信をDAVEエラー後に再起動する非同期関数。
+    _restart_tasks[guild_id] として管理され、二重起動を防止する。
+
+    Args:
+        guild_id: 再起動対象のギルドID
     """
-    # ── 診断ログ: この関数が実際に実行されているか確認 ──
-    logger.info("[DIAG] _restart_recording_after_dave_error 開始")
+    try:
+        await asyncio.sleep(3.0)  # DAVEエラー後、Pycord内部の状態が落ち着くまで待機
 
-    await asyncio.sleep(3.0)  # DAVEエラー後、少し待ってから再試行
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            logger.warning("自動再接続: guild_id=%d が見つかりません", guild_id)
+            return
 
-    # 全ギルドのVCを確認して再接続
-    for guild in bot.guilds:
         voice_client = guild.voice_client
         if voice_client is None:
-            logger.info("[DIAG] guild=%s: voice_client なし（スキップ）", guild.name)
-            continue
+            logger.warning("自動再接続: guild=%s の voice_client が存在しません", guild.name)
+            return
 
-        # ── 診断ログ: is_listening() の状態を確認 ──
-        is_listening = voice_client.is_listening()
-        logger.info(
-            "[DIAG] guild=%s | is_listening=%s | channel=%s",
+        # 既に録音中なら再起動不要（別の経路で復旧済み）
+        if voice_client.is_listening():
+            logger.info("自動再接続: guild=%s は既に録音中のためスキップ", guild.name)
+            return
+
+        logger.warning(
+            "自動再接続: guild=%s | channel=%s で start_recording() を再試行します",
             guild.name,
-            is_listening,
             getattr(voice_client.channel, "name", "unknown"),
         )
 
-        if not is_listening:
-            logger.warning(
-                "[DIAG] guild=%s: 音声受信が停止しています。再起動を試みます...",
-                guild.name,
-            )
-            try:
-                # 古いSinkをクリーンアップ
-                if guild.id in active_sinks:
-                    logger.info("[DIAG] 古いSinkをクリーンアップ | guild=%s", guild.name)
-                    active_sinks[guild.id].cleanup()
-                    del active_sinks[guild.id]
+        # 古いSinkをクリーンアップ
+        if guild_id in active_sinks:
+            active_sinks[guild_id].cleanup()
+            del active_sinks[guild_id]
 
-                # 新しいVADSinkを作成して録音を再開
-                loop = asyncio.get_event_loop()
-                new_sink = VADSink(queue=audio_queue, loop=loop)
-                active_sinks[guild.id] = new_sink
+        # 新しいVADSinkを作成して録音を再開
+        loop = asyncio.get_event_loop()
+        new_sink = VADSink(queue=audio_queue, loop=loop)
+        active_sinks[guild_id] = new_sink
 
-                voice_client.start_recording(new_sink, finished_callback)
-                new_sink.vc = voice_client
+        voice_client.start_recording(new_sink, finished_callback)
+        new_sink.vc = voice_client
 
-                logger.info(
-                    "[DIAG] 音声受信を再起動しました | guild=%s | channel=%s",
-                    guild.name,
-                    getattr(voice_client.channel, "name", "unknown"),
-                )
-            except Exception as e:
-                logger.error(
-                    "[DIAG] 音声受信の再起動に失敗しました | guild=%s: %s",
-                    guild.name,
-                    e,
-                    exc_info=True,
-                )
+        logger.info(
+            "自動再接続: 音声受信を再起動しました | guild=%s | channel=%s",
+            guild.name,
+            getattr(voice_client.channel, "name", "unknown"),
+        )
+
+    except Exception as e:
+        logger.error(
+            "自動再接続: 再起動に失敗しました | guild_id=%d: %s",
+            guild_id,
+            e,
+            exc_info=True,
+        )
+    finally:
+        # タスク管理辞書から自身を削除
+        _restart_tasks.pop(guild_id, None)
 
 
 def finished_callback(error: Exception | None) -> None:
@@ -901,49 +914,61 @@ def finished_callback(error: Exception | None) -> None:
     async def にすると "coroutine was never awaited" 警告が発生し、
     コールバック内の処理が一切実行されない。
 
+    DAVEエラー（OpusError: corrupted stream）が発生した場合、
+    Pycordは自動的に stop_recording() を呼び出す。このコールバックで
+    エラーを検出し、asyncio.run_coroutine_threadsafe() 経由で
+    自動再接続タスクをスケジュールする。
+
     py-cord master の AfterCallback = Callable[[Exception | None], Any] に合わせて
     引数は error のみ（旧 py-cord 2.4.x の sink, channel, *args とは異なる）。
     """
-    # ── 診断ログ: コールバックが実際に呼ばれているか確認 ──
-    logger.info(
-        "[DIAG] finished_callback 呼び出し確認 | error=%s | type=%s",
-        error,
-        type(error).__name__ if error else "None",
-    )
-
     if error:
-        import traceback
-        logger.error(
-            "[DIAG] 音声受信エラー詳細:\n%s",
-            "".join(traceback.format_exception(type(error), error, error.__traceback__)),
-        )
+        logger.error("音声受信エラー: %s (%s)", error, type(error).__name__)
 
-        # ── 診断: DAVEエラー（OpusError: corrupted stream）かどうか判定 ──
+        # DAVEエラー（OpusError: corrupted stream）かどうか判定
         error_str = str(error).lower()
         is_dave_error = (
             "corrupted stream" in error_str
             or "opus" in type(error).__name__.lower()
             or "dave" in error_str
         )
-        logger.info(
-            "[DIAG] DAVEエラー判定: is_dave_error=%s | error_class=%s",
-            is_dave_error,
-            type(error).__name__,
-        )
 
         if is_dave_error:
-            logger.warning(
-                "[DIAG] DAVEエラーを検出。自動再接続を試みます（3秒後）..."
-            )
-            # 非同期処理をスレッドセーフに実行
-            asyncio.run_coroutine_threadsafe(
-                _restart_recording_after_dave_error(),
-                bot.loop,
-            )
+            logger.warning("DAVEエラーを検出。3秒後に自動再接続を試みます...")
+
+            # 全ギルドのVCを確認して再接続タスクをスケジュール
+            # （stop_recording()がどのギルドから呼ばれたか特定するため全ギルドを走査）
+            for guild in bot.guilds:
+                if guild.voice_client is None:
+                    continue
+                if guild.voice_client.is_listening():
+                    continue  # 既に録音中のギルドはスキップ
+
+                guild_id = guild.id
+
+                # 既に再接続タスクが実行中の場合はスキップ（二重起動防止）
+                existing_task = _restart_tasks.get(guild_id)
+                if existing_task is not None and not existing_task.done():
+                    logger.info(
+                        "自動再接続タスクは既に実行中のためスキップ | guild=%s",
+                        guild.name,
+                    )
+                    continue
+
+                logger.info("自動再接続タスクをスケジュール | guild=%s", guild.name)
+                future = asyncio.run_coroutine_threadsafe(
+                    _restart_recording_for_guild(guild_id),
+                    bot.loop,
+                )
+                # Futureをタスクとして管理（done()チェックのため）
+                # run_coroutine_threadsafe はconcurrent.futures.Futureを返すため
+                # asyncio.Taskとして_restart_tasksに格納するには別途ラップが必要。
+                # ここでは簡易的にFutureをそのまま格納し、done()で完了確認する。
+                _restart_tasks[guild_id] = future  # type: ignore[assignment]
         else:
-            logger.error("[DIAG] 未知のエラーのため自動再接続をスキップします")
+            logger.error("未知のエラーのため自動再接続をスキップします: %s", error)
     else:
-        logger.info("[DIAG] 正常終了（エラーなし）")
+        logger.info("音声受信終了（正常終了）")
 
 
 @bot.slash_command(
@@ -967,6 +992,12 @@ async def leave_command(ctx: discord.ApplicationContext) -> None:
         return
 
     voice_client = ctx.guild.voice_client
+
+    # ── 自動再接続タスクをキャンセル（/leave 時は再接続不要） ──
+    existing_restart = _restart_tasks.pop(ctx.guild_id, None)
+    if existing_restart is not None and not existing_restart.done():
+        existing_restart.cancel()
+        logger.info("自動再接続タスクをキャンセル | guild=%s", ctx.guild.name)
 
     # ── 音声受信を停止 ──
     if voice_client.is_listening():
