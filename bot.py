@@ -793,7 +793,7 @@ async def join_command(ctx: discord.ApplicationContext) -> None:
             existing_restart.cancel()
             logger.info("自動再接続タスクをキャンセル | guild=%s", ctx.guild.name)
 
-        if ctx.guild.voice_client.is_listening():
+        if ctx.guild.voice_client.is_recording():
             ctx.guild.voice_client.stop_recording()
         await ctx.guild.voice_client.disconnect(force=True)
         # 既存のSinkをクリーンアップ
@@ -863,7 +863,7 @@ async def _restart_recording_for_guild(guild_id: int) -> None:
             return
 
         # 既に録音中なら再起動不要（別の経路で復旧済み）
-        if voice_client.is_listening():
+        if voice_client.is_recording():
             logger.info("自動再接続: guild=%s は既に録音中のためスキップ", guild.name)
             return
 
@@ -941,7 +941,7 @@ def finished_callback(error: Exception | None) -> None:
             for guild in bot.guilds:
                 if guild.voice_client is None:
                     continue
-                if guild.voice_client.is_listening():
+                if guild.voice_client.is_recording():
                     continue  # 既に録音中のギルドはスキップ
 
                 guild_id = guild.id
@@ -1000,7 +1000,7 @@ async def leave_command(ctx: discord.ApplicationContext) -> None:
         logger.info("自動再接続タスクをキャンセル | guild=%s", ctx.guild.name)
 
     # ── 音声受信を停止 ──
-    if voice_client.is_listening():
+    if voice_client.is_recording():
         voice_client.stop_recording()
         logger.info("音声受信停止 | guild=%s", ctx.guild.name)
 
