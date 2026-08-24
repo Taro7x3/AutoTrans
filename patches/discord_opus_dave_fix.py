@@ -1,24 +1,30 @@
 """
 discord_opus_dave_fix.py
 ========================
-Pycord masterブランチの opus.py における DAVE (E2E暗号化) 復号バグを修正するパッチスクリプト。
+Pycord masterブランチの音声受信における DAVE (E2E暗号化) 復号バグを修正するパッチスクリプト。
 
-【問題】
-Pycord master (2.8.2.dev) の PacketDecoder._decode_packet() は、
-DAVEセッションが存在する場合でも先にOpusデコードを実行し、
-その後でDAVE復号を試みる（順序が逆）。
+【問題の根本原因】
+Pycord master (2.8.2.dev) の PacketDecryptor.decrypt_rtp() は、
+dave.ready が False の間（MLS鍵交換が未完了の間）DAVE復号をスキップし、
+packet.decrypted_data を None のまま返す。
 
-  現在の誤った順序:
-    1. packet.decrypted_data をOpusデコード → corrupted stream エラー
-    2. (エラーにならなかった場合のみ) DAVE復号
+その後 PacketDecoder._decode_packet() が None をOpusデコードしようとして
+"corrupted stream" エラーが発生する。
 
-  正しい順序:
-    1. packet.decrypted_data をDAVE復号（DAVEセッションが存在し、can_passthrough が True の場合）
-    2. DAVE復号済みデータをOpusデコード
+  現在の誤った動作:
+    1. decrypt_rtp(): dave.ready=False → DAVE復号スキップ → decrypted_data=None
+    2. _decode_packet(): decode(None) → OpusError: corrupted stream
+
+  正しい動作:
+    1. decrypt_rtp(): dave.ready に関わらず DAVE復号を試みる
+       → 失敗時は OPUS_SILENCE にフォールバック
+    2. _decode_packet(): 有効なデータをOpusデコード
 
 【パッチ内容】
-PacketDecoder._decode_packet() をモンキーパッチで置き換え、
-DAVE復号をOpusデコードの前に実行するよう修正する。
+1. PacketDecryptor.decrypt_rtp() をモンキーパッチで置き換え、
+   dave.ready チェックを除去して常にDAVE復号を試みるよう修正する。
+2. PacketDecoder._decode_packet() をモンキーパッチで置き換え、
+   decrypted_data が None の場合に OPUS_SILENCE にフォールバックするよう修正する。
 
 【使用方法】
   # bot.py の先頭付近でインポートするだけで自動適用される
@@ -42,10 +48,6 @@ from typing import TYPE_CHECKING
 _log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# パッチ適用
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 診断カウンター（INFOレベルで定期的に状態を報告するため）
 # ─────────────────────────────────────────────────────────────────────────────
 _diag_counters: dict = {
@@ -58,85 +60,169 @@ _diag_counters: dict = {
     "opus_ok": 0,
     "opus_fail": 0,
     "write_called": 0,
+    # decrypt_rtp パッチ用
+    "decrypt_rtp_total": 0,
+    "decrypt_rtp_dave_ok": 0,
+    "decrypt_rtp_dave_fail": 0,
+    "decrypt_rtp_dave_skipped_no_session": 0,
+    "decrypt_rtp_dave_skipped_no_uid": 0,
+    "decrypt_rtp_dave_ready_false": 0,
 }
 _DIAG_REPORT_INTERVAL = 50  # 50パケットごとにINFOログで状態を報告
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# パッチ1: PacketDecryptor.decrypt_rtp()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _patched_decrypt_rtp(self, packet):
+    """
+    PacketDecryptor.decrypt_rtp() のパッチ版。
+
+    修正内容:
+      - dave.ready が False でも DAVE復号を試みる。
+        （オリジナルは dave.ready=True の場合のみDAVE復号を実行する）
+      - DAVE復号に失敗した場合は OPUS_SILENCE にフォールバック。
+      - dave_session が None の場合は元の動作と同じ（NaCl復号のみ）。
+
+    診断ログ:
+      - 50パケットごとにINFOレベルで処理統計を出力する。
+    """
+    import davey as _davey
+    from discord.voice.packets.core import OPUS_SILENCE
+
+    state = self.client._connection
+    dave = state.dave_session
+
+    # NaCl復号（元の動作と同じ）
+    raw_payload = self._decryptor_rtp(packet)
+
+    _diag_counters["decrypt_rtp_total"] += 1
+    total = _diag_counters["decrypt_rtp_total"]
+
+    if dave is not None:
+        uid = state.ssrc_user_map.get(packet.ssrc)
+        if uid:
+            if not dave.ready:
+                # dave.ready=False: MLS鍵交換が未完了
+                # オリジナルはここでスキップするが、パッチでは復号を試みる
+                _diag_counters["decrypt_rtp_dave_ready_false"] += 1
+                _log.debug(
+                    "[DAVE patch decrypt_rtp] dave.ready=False for ssrc=%s uid=%s, "
+                    "attempting DAVE decrypt anyway",
+                    packet.ssrc,
+                    uid,
+                )
+
+            try:
+                decrypted_audio = _davey.DaveSession.decrypt(
+                    dave, uid, _davey.MediaType.audio, raw_payload
+                )
+                _diag_counters["decrypt_rtp_dave_ok"] += 1
+                _log.debug(
+                    "[DAVE patch decrypt_rtp] DAVE decrypt OK for ssrc=%s uid=%s "
+                    "(dave.ready=%s)",
+                    packet.ssrc,
+                    uid,
+                    dave.ready,
+                )
+
+                if packet.extended:
+                    offset = packet.update_extended_header(decrypted_audio)
+                    packet.decrypted_data = decrypted_audio[offset:]
+                else:
+                    packet.decrypted_data = decrypted_audio
+
+            except Exception as exc:
+                _diag_counters["decrypt_rtp_dave_fail"] += 1
+                _log.debug(
+                    "[DAVE patch decrypt_rtp] DAVE decrypt FAILED for ssrc=%s uid=%s "
+                    "(dave.ready=%s): %s → falling back to OPUS_SILENCE",
+                    packet.ssrc,
+                    uid,
+                    dave.ready,
+                    exc,
+                )
+                # DAVE復号失敗時は OPUS_SILENCE にフォールバック
+                # （None のまま返すと opus_decode が corrupted stream エラーを出す）
+                packet.decrypted_data = OPUS_SILENCE
+        else:
+            _diag_counters["decrypt_rtp_dave_skipped_no_uid"] += 1
+            _log.debug(
+                "[DAVE patch decrypt_rtp] No uid for ssrc=%s, skipping DAVE decrypt",
+                packet.ssrc,
+            )
+            # uid が不明な場合: NaCl復号済みデータをそのまま使用
+            # extended header の処理
+            if packet.extended:
+                offset = packet.update_extended_header(raw_payload)
+                packet.decrypted_data = raw_payload[offset:]
+            else:
+                packet.decrypted_data = raw_payload
+    else:
+        _diag_counters["decrypt_rtp_dave_skipped_no_session"] += 1
+        # DAVEセッションなし: NaCl復号済みデータをそのまま使用
+        if packet.extended:
+            offset = packet.update_extended_header(raw_payload)
+            packet.decrypted_data = raw_payload[offset:]
+        else:
+            packet.decrypted_data = raw_payload
+
+    # 定期診断レポート（50パケットごと）
+    if total % _DIAG_REPORT_INTERVAL == 0:
+        _log.info(
+            "[DAVE patch decrypt_rtp 診断] パケット数=%d | "
+            "DAVEセッションなし=%d | uid不明=%d | dave.ready=False時の試行=%d | "
+            "DAVE復号成功=%d | DAVE復号失敗=%d",
+            total,
+            _diag_counters["decrypt_rtp_dave_skipped_no_session"],
+            _diag_counters["decrypt_rtp_dave_skipped_no_uid"],
+            _diag_counters["decrypt_rtp_dave_ready_false"],
+            _diag_counters["decrypt_rtp_dave_ok"],
+            _diag_counters["decrypt_rtp_dave_fail"],
+        )
+
+    return packet.decrypted_data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# パッチ2: PacketDecoder._decode_packet()
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _patched_decode_packet(self, packet):
     """
     PacketDecoder._decode_packet() のパッチ版。
 
     修正内容:
-      - DAVEセッションが存在し can_passthrough(user_id) が True の場合、
-        Opusデコードの前に DAVE復号を実行する。
-      - DAVEセッションが存在しない、または can_passthrough が False の場合は
-        元の動作と同じ（Opusデコードのみ）。
-      - DAVE復号に失敗した場合は元のデータでOpusデコードを試みる（フォールバック）。
+      - packet.decrypted_data が None の場合に OPUS_SILENCE にフォールバック。
+        （オリジナルは None をそのまま decode() に渡して corrupted stream エラーを出す）
+      - Opusデコード失敗時は無音PCMを返す（エラーを上位に伝播させない）。
 
     診断ログ:
       - 50パケットごとにINFOレベルで処理統計を出力する。
-      - これにより、DAVEセッション状態・can_passthrough状態・Opusデコード成否を確認できる。
     """
-    import davey as _davey
-    from discord.opus import HAS_DAVEY
+    from discord.voice.packets.core import OPUS_SILENCE
 
     assert self._decoder is not None
     assert self.sink.client
 
     user_id = self._cached_id
-    dave = self.sink.client._connection.dave_session
-    in_dave = dave is not None
 
     # ── 診断カウンター更新 ──
     _diag_counters["total"] += 1
     total = _diag_counters["total"]
 
-    _log.debug(
-        "[DAVE patch] Decoding packet for user %s (DAVE enabled: %s, HAS_DAVEY: %s). "
-        "Has decrypted data?: %s",
-        user_id,
-        in_dave,
-        HAS_DAVEY,
-        packet.decrypted_data is not None,
-    )
+    # decrypted_data が None の場合は OPUS_SILENCE にフォールバック
+    # （PacketDecryptor.decrypt_rtp() が dave.ready=False でスキップした場合に発生）
+    if packet and packet.decrypted_data is None:
+        _log.debug(
+            "[DAVE patch decode] decrypted_data is None for user %s, "
+            "using OPUS_SILENCE as fallback",
+            user_id,
+        )
+        packet.decrypted_data = OPUS_SILENCE
 
-    # ── Step 1: DAVE復号（Opusデコードの前に実行） ──
-    # DAVEセッションが存在し、ユーザーが can_passthrough の場合のみ実行
-    dave_decrypt_applied = False
-    if HAS_DAVEY and in_dave and user_id is not None:
-        try:
-            can_pt = dave.can_passthrough(user_id)
-            if can_pt:
-                _log.debug(
-                    "[DAVE patch] User %s can_passthrough=True, applying DAVE decrypt before Opus decode",
-                    user_id,
-                )
-                decrypted = dave.decrypt(user_id, _davey.MediaType.audio, packet.decrypted_data)
-                packet.decrypted_data = decrypted
-                dave_decrypt_applied = True
-                _diag_counters["dave_decrypt_ok"] += 1
-                _log.debug("[DAVE patch] DAVE decrypt succeeded for user %s", user_id)
-            else:
-                _diag_counters["dave_skipped_no_passthrough"] += 1
-                _log.debug(
-                    "[DAVE patch] User %s can_passthrough=False, skipping DAVE decrypt "
-                    "(DAVE negotiation may still be in progress)",
-                    user_id,
-                )
-        except Exception as exc:
-            _diag_counters["dave_decrypt_fail"] += 1
-            _log.debug(
-                "[DAVE patch] DAVE decrypt failed for user %s (falling back to raw data): %s",
-                user_id,
-                exc,
-            )
-            # DAVE復号失敗時はフォールバック（元のデータでOpusデコードを試みる）
-    elif not in_dave:
-        _diag_counters["dave_skipped_no_session"] += 1
-    elif user_id is None:
-        _diag_counters["dave_skipped_no_user"] += 1
-
-    # ── Step 2: Opusデコード ──
+    # ── Opusデコード ──
     other_code = True
     pcm = None
 
@@ -148,10 +234,8 @@ def _patched_decode_packet(self, packet):
         except Exception as exc:
             _diag_counters["opus_fail"] += 1
             _log.debug(
-                "[DAVE patch] Opus decode failed for user %s "
-                "(dave_applied=%s, DAVE negotiation may be incomplete): %s",
+                "[DAVE patch decode] Opus decode failed for user %s: %s",
                 user_id,
-                dave_decrypt_applied,
                 exc,
             )
             # Opusデコード失敗時は無音PCMを返す（エラーを上位に伝播させない）
@@ -165,7 +249,7 @@ def _patched_decode_packet(self, packet):
             nextdata = next_packet.decrypted_data
 
             _log.debug(
-                "[DAVE patch] Generating fec packet: fake=%s, fec=%s",
+                "[DAVE patch decode] Generating fec packet: fake=%s, fec=%s",
                 packet.sequence,
                 next_packet.sequence,
             )
@@ -174,7 +258,7 @@ def _patched_decode_packet(self, packet):
                 _diag_counters["opus_ok"] += 1
             except Exception as exc:
                 _diag_counters["opus_fail"] += 1
-                _log.debug("[DAVE patch] FEC decode failed: %s", exc)
+                _log.debug("[DAVE patch decode] FEC decode failed: %s", exc)
                 pcm = b"\x00" * 3840
         else:
             try:
@@ -182,7 +266,7 @@ def _patched_decode_packet(self, packet):
                 _diag_counters["opus_ok"] += 1
             except Exception as exc:
                 _diag_counters["opus_fail"] += 1
-                _log.debug("[DAVE patch] FEC (no next packet) decode failed: %s", exc)
+                _log.debug("[DAVE patch decode] FEC (no next packet) decode failed: %s", exc)
                 pcm = b"\x00" * 3840
 
     # ── 定期診断レポート（50パケットごと） ──
@@ -192,17 +276,10 @@ def _patched_decode_packet(self, packet):
             _diag_counters["opus_fail"] / opus_total * 100 if opus_total > 0 else 0
         )
         _log.info(
-            "[DAVE patch 診断] パケット数=%d | "
-            "DAVEセッションなし=%d | ユーザーIDなし=%d | can_passthrough=False=%d | "
-            "DAVE復号成功=%d | DAVE復号失敗=%d | "
+            "[DAVE patch decode 診断] パケット数=%d | "
             "Opusデコード成功=%d | Opusデコード失敗=%d (失敗率=%.1f%%) | "
             "write()呼び出し=%d",
             total,
-            _diag_counters["dave_skipped_no_session"],
-            _diag_counters["dave_skipped_no_user"],
-            _diag_counters["dave_skipped_no_passthrough"],
-            _diag_counters["dave_decrypt_ok"],
-            _diag_counters["dave_decrypt_fail"],
             _diag_counters["opus_ok"],
             _diag_counters["opus_fail"],
             opus_fail_rate,
@@ -212,46 +289,90 @@ def _patched_decode_packet(self, packet):
     return packet, pcm
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# パッチ適用
+# ─────────────────────────────────────────────────────────────────────────────
+
 def apply_patch() -> bool:
     """
-    Pycordの PacketDecoder._decode_packet() にパッチを適用する。
+    Pycordの PacketDecryptor.decrypt_rtp() と PacketDecoder._decode_packet() に
+    パッチを適用する。
 
     Returns:
         True: パッチ適用成功
         False: パッチ適用失敗（Pycordのバージョンが変わった可能性）
     """
+    success = True
+
+    # ── パッチ1: PacketDecryptor.decrypt_rtp() ──
+    try:
+        from discord.voice.receive.reader import PacketDecryptor
+
+        if getattr(PacketDecryptor.decrypt_rtp, "_dave_patched", False):
+            _log.info("[DAVE patch] PacketDecryptor.decrypt_rtp パッチは既に適用済みです。スキップします。")
+        else:
+            original_decrypt_rtp = PacketDecryptor.decrypt_rtp
+            _patched_decrypt_rtp._dave_patched = True  # type: ignore[attr-defined]
+            _patched_decrypt_rtp._original = original_decrypt_rtp  # type: ignore[attr-defined]
+            PacketDecryptor.decrypt_rtp = _patched_decrypt_rtp  # type: ignore[method-assign]
+            _log.info(
+                "[DAVE patch] PacketDecryptor.decrypt_rtp() にDAVEパッチを適用しました。"
+                " (dave.ready=False でもDAVE復号を試みるよう修正)"
+            )
+
+    except ImportError as e:
+        _log.error("[DAVE patch] PacketDecryptor のインポートに失敗しました: %s", e)
+        success = False
+    except AttributeError as e:
+        _log.error(
+            "[DAVE patch] PacketDecryptor.decrypt_rtp が見つかりません"
+            "（Pycordのバージョンが変わった可能性）: %s",
+            e,
+        )
+        success = False
+    except Exception as e:
+        _log.error(
+            "[DAVE patch] PacketDecryptor パッチ適用中に予期しないエラー: %s",
+            e,
+            exc_info=True,
+        )
+        success = False
+
+    # ── パッチ2: PacketDecoder._decode_packet() ──
     try:
         from discord.opus import PacketDecoder
 
-        # 既にパッチ適用済みかチェック
         if getattr(PacketDecoder._decode_packet, "_dave_patched", False):
-            _log.info("[DAVE patch] パッチは既に適用済みです。スキップします。")
-            return True
-
-        # パッチを適用
-        original = PacketDecoder._decode_packet
-        _patched_decode_packet._dave_patched = True  # type: ignore[attr-defined]
-        _patched_decode_packet._original = original  # type: ignore[attr-defined]
-        PacketDecoder._decode_packet = _patched_decode_packet  # type: ignore[method-assign]
-
-        _log.info(
-            "[DAVE patch] PacketDecoder._decode_packet() にDAVEパッチを適用しました。"
-            " (Pycord issue #3139 の回避策)"
-        )
-        return True
+            _log.info("[DAVE patch] PacketDecoder._decode_packet パッチは既に適用済みです。スキップします。")
+        else:
+            original_decode_packet = PacketDecoder._decode_packet
+            _patched_decode_packet._dave_patched = True  # type: ignore[attr-defined]
+            _patched_decode_packet._original = original_decode_packet  # type: ignore[attr-defined]
+            PacketDecoder._decode_packet = _patched_decode_packet  # type: ignore[method-assign]
+            _log.info(
+                "[DAVE patch] PacketDecoder._decode_packet() にDAVEパッチを適用しました。"
+                " (decrypted_data=None 時の OPUS_SILENCE フォールバック追加)"
+            )
 
     except ImportError as e:
-        _log.error("[DAVE patch] Pycordのインポートに失敗しました: %s", e)
-        return False
+        _log.error("[DAVE patch] PacketDecoder のインポートに失敗しました: %s", e)
+        success = False
     except AttributeError as e:
         _log.error(
-            "[DAVE patch] パッチ対象のメソッドが見つかりません（Pycordのバージョンが変わった可能性）: %s",
+            "[DAVE patch] PacketDecoder._decode_packet が見つかりません"
+            "（Pycordのバージョンが変わった可能性）: %s",
             e,
         )
-        return False
+        success = False
     except Exception as e:
-        _log.error("[DAVE patch] パッチ適用中に予期しないエラーが発生しました: %s", e, exc_info=True)
-        return False
+        _log.error(
+            "[DAVE patch] PacketDecoder パッチ適用中に予期しないエラー: %s",
+            e,
+            exc_info=True,
+        )
+        success = False
+
+    return success
 
 
 def remove_patch() -> bool:
@@ -262,26 +383,47 @@ def remove_patch() -> bool:
         True: パッチ除去成功
         False: パッチが適用されていない、または除去失敗
     """
+    success = True
+
+    # PacketDecryptor.decrypt_rtp のパッチ除去
+    try:
+        from discord.voice.receive.reader import PacketDecryptor
+
+        current = PacketDecryptor.decrypt_rtp
+        if getattr(current, "_dave_patched", False):
+            original = getattr(current, "_original", None)
+            if original is not None:
+                PacketDecryptor.decrypt_rtp = original  # type: ignore[method-assign]
+                _log.info("[DAVE patch] PacketDecryptor.decrypt_rtp パッチを除去しました。")
+            else:
+                _log.warning("[DAVE patch] PacketDecryptor.decrypt_rtp のオリジナルが見つかりません。")
+                success = False
+        else:
+            _log.info("[DAVE patch] PacketDecryptor.decrypt_rtp パッチは適用されていません。")
+    except Exception as e:
+        _log.error("[DAVE patch] PacketDecryptor パッチ除去中にエラー: %s", e)
+        success = False
+
+    # PacketDecoder._decode_packet のパッチ除去
     try:
         from discord.opus import PacketDecoder
 
         current = PacketDecoder._decode_packet
-        if not getattr(current, "_dave_patched", False):
-            _log.info("[DAVE patch] パッチは適用されていません。")
-            return False
-
-        original = getattr(current, "_original", None)
-        if original is None:
-            _log.warning("[DAVE patch] オリジナルメソッドが見つかりません。パッチを除去できません。")
-            return False
-
-        PacketDecoder._decode_packet = original  # type: ignore[method-assign]
-        _log.info("[DAVE patch] パッチを除去しました。")
-        return True
-
+        if getattr(current, "_dave_patched", False):
+            original = getattr(current, "_original", None)
+            if original is not None:
+                PacketDecoder._decode_packet = original  # type: ignore[method-assign]
+                _log.info("[DAVE patch] PacketDecoder._decode_packet パッチを除去しました。")
+            else:
+                _log.warning("[DAVE patch] PacketDecoder._decode_packet のオリジナルが見つかりません。")
+                success = False
+        else:
+            _log.info("[DAVE patch] PacketDecoder._decode_packet パッチは適用されていません。")
     except Exception as e:
-        _log.error("[DAVE patch] パッチ除去中にエラーが発生しました: %s", e)
-        return False
+        _log.error("[DAVE patch] PacketDecoder パッチ除去中にエラー: %s", e)
+        success = False
+
+    return success
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,14 +452,19 @@ if __name__ == "__main__":
     success = apply_patch()
 
     if success:
+        from discord.voice.receive.reader import PacketDecryptor
         from discord.opus import PacketDecoder
-        is_patched = getattr(PacketDecoder._decode_packet, "_dave_patched", False)
-        status = "適用済み" if is_patched else "未適用"
-        print(f"\n[OK] パッチ適用状態: {status}")
-        print(f"   対象メソッド: discord.opus.PacketDecoder._decode_packet")
-        print(f"   修正内容: DAVE復号をOpusデコードの前に実行するよう変更")
+
+        is_decrypt_patched = getattr(PacketDecryptor.decrypt_rtp, "_dave_patched", False)
+        is_decode_patched = getattr(PacketDecoder._decode_packet, "_dave_patched", False)
+
+        print(f"\n[OK] パッチ適用状態:")
+        print(f"   PacketDecryptor.decrypt_rtp: {'適用済み' if is_decrypt_patched else '未適用'}")
+        print(f"   PacketDecoder._decode_packet: {'適用済み' if is_decode_patched else '未適用'}")
+        print(f"\n   修正内容1: dave.ready=False でもDAVE復号を試みるよう変更")
+        print(f"   修正内容2: decrypted_data=None 時に OPUS_SILENCE フォールバック追加")
         print(f"   参照: https://github.com/Pycord-Development/pycord/issues/3139")
-        sys.exit(0)
+        sys.exit(0 if (is_decrypt_patched and is_decode_patched) else 1)
     else:
         print("\n[FAIL] パッチの適用に失敗しました。ログを確認してください。")
         sys.exit(1)
