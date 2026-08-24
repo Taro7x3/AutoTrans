@@ -1,45 +1,9 @@
-# AutoTrans Bot - 依存パッケージ一覧
-# =====================================================
-# 注意: PyTorch (CUDA版) は別途インストールが必要です。
-# 詳細は SETUP.md の「PyTorch CUDA版のインストール」を参照してください。
-#
-# PyTorch CUDA版インストールコマンド（CUDA 12.1対応）:
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-#
-# 上記コマンドを先に実行してから、このファイルで残りをインストールしてください:
-#   pip install -r requirements.txt
-# =====================================================
+# AutoTrans Bot dependencies
+# Note: torch and torchaudio must be installed separately:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Discord ライブラリ（音声受信機能付き）
-py-cord[voice]>=2.6.1
-
-# 高速Whisper STTエンジン
-faster-whisper>=1.1.1
-
-# 非同期HTTPクライアント（Ollama API通信用）
-aiohttp>=3.11.11
-
-# 環境変数管理
-python-dotenv>=1.0.1
-
-# 数値計算（音声データ処理用）
-numpy>=1.26.4
-
-# ─────────────────────────────────────────────────────
-# Silero VAD について
-# ─────────────────────────────────────────────────────
-# Silero VADはtorch.hub経由で自動ダウンロードされます。
-# bot.py内で以下のコードにより初回起動時にダウンロードされます:
-#
-#   torch.hub.load('snakers4/silero-vad', 'silero_vad', ...)
-#
-# キャッシュ先: ~/.cache/torch/hub/snakers4_silero-vad_master/
-#
-# pipパッケージとして直接インストールする場合（オプション）:
-#   pip install silero-vad
-# ただし、torch.hub版との互換性を確認してください。
-# ─────────────────────────────────────────────────────
-
-# PyTorch / torchaudio は上記の注意書きに従い別途インストール
-# torch>=2.5.1  # pip install torch --index-url https://download.pytorch.org/whl/cu121
-# torchaudio>=2.5.1  # pip install torchaudio --index-url https://download.pytorch.org/whl/cu121
+py-cord[voice]>=2.6.0
+faster-whisper>=1.0.0
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
