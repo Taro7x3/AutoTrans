@@ -15,7 +15,10 @@ import logging
 import os
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from discord.voice import VoiceData
 
 import aiohttp
 import discord
@@ -174,9 +177,9 @@ http_session: Optional[aiohttp.ClientSession] = None
 # ─────────────────────────────────────────────
 # VADSink: Discord音声受信 + Silero VAD統合
 # ─────────────────────────────────────────────
-class VADSink(discord.sinks.AudioSink):
+class VADSink(discord.sinks.Sink):
     """
-    py-cordのカスタムAudioSink。
+    py-cordのカスタムSink。
     受信した音声パケットをSilero VADでリアルタイム監視し、
     発話区間を検出してasyncio.Queueに投入する。
 
@@ -186,7 +189,7 @@ class VADSink(discord.sinks.AudioSink):
     """
 
     def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
-        super().__init__()
+        super().__init__(filters=None)
         self.queue = queue
         self.loop = loop
 
@@ -215,24 +218,29 @@ class VADSink(discord.sinks.AudioSink):
             VAD_THRESHOLD,
         )
 
-    def write(self, data: discord.sinks.core.RawData, user: discord.User) -> None:
+    def write(self, data: "VoiceData", user) -> None:
         """
         py-cordが音声パケットを受信するたびに呼び出されるメソッド。
         PCMデータをVADで処理し、発話区間を検出する。
 
         Args:
-            data: 受信した生音声データ（48kHz stereo 16bit PCM）
-            user: 発話しているDiscordユーザー
+            data: 受信した音声データ（VoiceData: .pcm に48kHz stereo 16bit PCMバイト列）
+            user: 発話しているDiscordユーザー（User | Member | None）
         """
         if vad_model is None:
             return
 
+        # py-cord 2.8.1: userはNoneの場合がある（SSRCとユーザーの紐付けが未完了）
+        if user is None:
+            return
+
         user_id = user.id
         state = self._user_states[user_id]
-        state["display_name"] = user.display_name
+        state["display_name"] = getattr(user, "display_name", str(user_id))
 
         # ── Step 1: 48kHz stereo 16bit PCM → 16kHz mono float32 に変換 ──
-        pcm_bytes = data.data
+        # py-cord 2.8.1: PCMデータは data.pcm (bytes) でアクセス
+        pcm_bytes = data.pcm
         if len(pcm_bytes) == 0:
             return
 
@@ -326,9 +334,8 @@ class VADSink(discord.sinks.AudioSink):
         self._user_states.clear()
         logger.info("VADSinkクリーンアップ完了")
 
-    @property
-    def wants_opus(self) -> bool:
-        """OpusではなくPCMデータを受け取る"""
+    def is_opus(self) -> bool:
+        """OpusではなくPCMデータを受け取る（py-cord 2.8.1 API）"""
         return False
 
 
