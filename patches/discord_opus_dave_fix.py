@@ -147,47 +147,57 @@ def _patched_decrypt_rtp(self, packet):
                     uid,
                 )
 
-            # ── 修正: DAVE 復号の「前」に拡張ヘッダーを除去する ──
-            # RTP 拡張ヘッダー（0xBEDE...）は平文側に存在し、DAVE 暗号化の外側にある。
-            # 拡張ヘッダーを除去せずに DAVE 復号器に渡すと、境界がズレて
-            # 復号結果がゴミデータになり、Opus デコードが corrupted stream で失敗する。
-            # これが Opus デコード失敗率 ~50% の根本原因。
-            payload_to_decrypt = raw_payload
+            # ── 修正: 拡張ヘッダーのオフセットを事前計算し、復号後にスライスする ──
+            #
+            # 正しい処理フロー:
+            #   1. raw_payload から拡張ヘッダーのオフセットを「事前に」計算する
+            #   2. davey.DaveSession.decrypt には raw_payload をそのまま渡す
+            #      （davey は拡張ヘッダーを AAD として内部参照するため、切り落とすと認証失敗）
+            #   3. 復号後の decrypted_audio に事前計算したオフセットを適用してスライスする
+            #
+            # 誤った処理（旧実装）:
+            #   - decrypted_audio（復号後の Opus データ）に update_extended_header を呼ぶ
+            #     → Opus データを拡張ヘッダーと誤認してスライスし、フレームを破壊
+            #     → Opus デコード失敗率 ~50% の根本原因
+            offset = 0
             if packet.extended:
-                ext_offset = packet.update_extended_header(raw_payload)
-                payload_to_decrypt = raw_payload[ext_offset:]
+                offset = packet.update_extended_header(raw_payload)
 
             try:
-                # 拡張ヘッダーを除去した純粋な DAVE ペイロードを復号に渡す
+                # davey には raw_payload をそのまま渡す（認証タグ検証のため）
                 decrypted_audio = _davey.DaveSession.decrypt(
-                    dave, uid, _davey.MediaType.audio, payload_to_decrypt
+                    dave, uid, _davey.MediaType.audio, raw_payload
                 )
                 _diag_counters["decrypt_rtp_dave_ok"] += 1
                 _log.debug(
                     "[DAVE patch decrypt_rtp] DAVE decrypt OK for ssrc=%s uid=%s "
-                    "(dave.ready=%s, extended=%s, ext_offset=%s)",
+                    "(dave.ready=%s, extended=%s, offset=%d)",
                     packet.ssrc,
                     uid,
                     dave.ready,
                     packet.extended,
-                    ext_offset if packet.extended else 0,
+                    offset,
                 )
 
-                # 復号結果は純粋な Opus フレーム（拡張ヘッダー除去済み）
-                packet.decrypted_data = decrypted_audio
+                # 事前計算したオフセットで拡張ヘッダー分をスライス
+                if offset > 0:
+                    packet.decrypted_data = decrypted_audio[offset:]
+                else:
+                    packet.decrypted_data = decrypted_audio
 
             except Exception as exc:
                 _diag_counters["decrypt_rtp_dave_fail"] += 1
-                _log.debug(
-                    "[DAVE patch decrypt_rtp] DAVE decrypt FAILED for ssrc=%s uid=%s "
-                    "(dave.ready=%s): %s → falling back to OPUS_SILENCE",
+                # ── 修正: ERROR レベルで例外の詳細と型を出力する ──
+                _log.error(
+                    "[DAVE patch decrypt_rtp] DAVE decrypt FAILED for ssrc=%s uid=%s (extended=%s, offset=%d): %s (%s)",
                     packet.ssrc,
                     uid,
-                    dave.ready,
+                    packet.extended,
+                    offset,
                     exc,
+                    type(exc).__name__,
+                    exc_info=True, # スタックトレースも出力
                 )
-                # DAVE復号失敗時は OPUS_SILENCE にフォールバック
-                # （None のまま返すと opus_decode が corrupted stream エラーを出す）
                 packet.decrypted_data = OPUS_SILENCE
         else:
             _diag_counters["decrypt_rtp_dave_skipped_no_uid"] += 1
