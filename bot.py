@@ -252,7 +252,18 @@ class VADSink(discord.sinks.Sink):
 
         # ── Step 1: 48kHz stereo 16bit PCM → 16kHz mono float32 に変換 ──
         # py-cord 2.8.1: PCMデータは data.pcm (bytes) でアクセス
-        pcm_bytes = data.pcm
+        # Discord DAVE E2E暗号化により音声ストリームが破損している場合があるため、
+        # OpusError: corrupted stream を含む例外をキャッチしてスキップする。
+        try:
+            pcm_bytes = data.pcm
+        except Exception as e:
+            logger.warning(
+                "音声データ取得エラー (user_id=%d, DAVE暗号化による破損の可能性): %s",
+                user_id,
+                e,
+            )
+            return
+
         if len(pcm_bytes) == 0:
             return
 
@@ -290,6 +301,11 @@ class VADSink(discord.sinks.Sink):
             # ── Step 3: Silero VADで発話確率を計算 ──
             try:
                 chunk_tensor = torch.from_numpy(chunk).unsqueeze(0)  # shape: (1, 512)
+                # VADモデルのデバイス（CPU or CUDA）を検出し、入力テンソルを同じデバイスに移動する。
+                # モデルがCUDAにロードされている場合、CPUテンソルのままだと
+                # RuntimeError: Expected all tensors to be on the same device が発生する。
+                vad_device = next(vad_model.parameters()).device
+                chunk_tensor = chunk_tensor.to(vad_device)
                 with torch.no_grad():
                     speech_prob = vad_model(chunk_tensor, VAD_SAMPLE_RATE).item()
             except Exception as e:
