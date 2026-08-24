@@ -425,55 +425,154 @@ try {
 }
 
 if (-not $ollamaInstalled) {
+    # まず --silent でサイレントインストールを試みる
+    $wingetSuccess = $false
     try {
-        Write-Running "Ollama をインストールしています... (数分かかる場合があります)"
-        Write-Log "winget install Ollama.Ollama を実行します。"
+        Write-Running "Ollama をサイレントインストールしています... (数分かかる場合があります)"
+        Write-Log "winget install Ollama.Ollama --silent を実行します。"
         winget install --id Ollama.Ollama --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object {
             Write-Log "  winget: $_"
         }
-        Write-Running "PATHを更新しています..."
-        Refresh-Path
+        if ($LASTEXITCODE -eq 0) {
+            $wingetSuccess = $true
+            Write-Log "winget --silent インストール成功。"
+        } else {
+            Write-Log "winget --silent が終了コード $LASTEXITCODE で終了。通常インストールにフォールバックします。"
+        }
+    } catch {
+        Write-Log "winget --silent 失敗: $_。通常インストールにフォールバックします。"
+    }
 
-        $ollamaPaths = @(
-            "$env:LOCALAPPDATA\Programs\Ollama",
-            "C:\Program Files\Ollama",
-            "$env:ProgramFiles\Ollama"
-        )
-        foreach ($op in $ollamaPaths) {
-            if (Test-Path "$op\ollama.exe") {
+    # --silent が失敗した場合は通常インストール（GUIインストーラー）にフォールバック
+    if (-not $wingetSuccess) {
+        try {
+            Write-Running "Ollama を通常インストールしています... (GUIインストーラーが起動します)"
+            Write-Host "  ※ インストーラーが起動したら指示に従ってインストールを完了してください。" -ForegroundColor Yellow
+            Write-Log "winget install Ollama.Ollama (通常) を実行します。"
+            winget install --id Ollama.Ollama --source winget --accept-package-agreements --accept-source-agreements 2>&1 | ForEach-Object {
+                Write-Log "  winget: $_"
+            }
+            Write-Log "winget 通常インストール完了 (終了コード: $LASTEXITCODE)。"
+        } catch {
+            Write-Err "Ollama のインストールに失敗しました: $_"
+            Write-Log "Ollama インストールエラー: $_"
+            Confirm-Continue "Ollama のインストールに失敗しました。続行しますか？ (Y/N)"
+        }
+    }
+
+    # PATHを更新してollamaコマンドを認識させる
+    Write-Running "PATHを更新しています..."
+    Refresh-Path
+
+    $ollamaPaths = @(
+        "$env:LOCALAPPDATA\Programs\Ollama",
+        "C:\Program Files\Ollama",
+        "$env:ProgramFiles\Ollama"
+    )
+    foreach ($op in $ollamaPaths) {
+        if (Test-Path "$op\ollama.exe") {
+            if ($env:Path -notlike "*$op*") {
                 $env:Path += ";$op"
                 Write-Log "Ollamaパス追加: $op"
+            }
+            break
+        }
+    }
+
+    # ollamaコマンドが使えるか確認（最大30秒待機）
+    $ollamaFound = $false
+    for ($i = 0; $i -lt 6; $i++) {
+        if (Get-Command ollama -ErrorAction SilentlyContinue) {
+            $ollamaFound = $true
+            break
+        }
+        # フルパスでも確認
+        foreach ($op in $ollamaPaths) {
+            if (Test-Path "$op\ollama.exe") {
+                if ($env:Path -notlike "*$op*") {
+                    $env:Path += ";$op"
+                }
+                $ollamaFound = $true
                 break
             }
         }
+        if ($ollamaFound) { break }
+        Write-Info "Ollamaコマンドを待機中... ($($i+1)/6)"
+        Write-Log "Ollamaコマンド待機中 ($($i+1)/6)。"
+        Start-Sleep -Seconds 5
+    }
 
+    if ($ollamaFound) {
         Write-Done "Ollama のインストールが完了しました。"
         Write-Log "Ollama インストール完了。"
         $ollamaInstalled = $true
-    } catch {
-        Write-Err "Ollama のインストールに失敗しました: $_"
-        Write-Log "Ollama インストールエラー: $_"
-        Confirm-Continue "Ollama のインストールに失敗しました。続行しますか？ (Y/N)"
+    } else {
+        Write-Err "Ollamaコマンドが見つかりません。インストールが完了していない可能性があります。"
+        Write-Log "Ollamaコマンド未検出。インストール失敗の可能性。"
+        Confirm-Continue "Ollama のインストールを確認できませんでした。続行しますか？ (Y/N)"
     }
 }
 
+# Ollama serve をバックグラウンドで起動（すでに起動していなければ）
 Write-Running "Ollama サービスを起動しています..."
+$ollamaExePath = $null
+$ollamaPaths = @(
+    "$env:LOCALAPPDATA\Programs\Ollama",
+    "C:\Program Files\Ollama",
+    "$env:ProgramFiles\Ollama"
+)
+foreach ($op in $ollamaPaths) {
+    if (Test-Path "$op\ollama.exe") {
+        $ollamaExePath = "$op\ollama.exe"
+        break
+    }
+}
+
 try {
     $ollamaProc = Get-Process -Name "ollama" -ErrorAction SilentlyContinue
     if ($ollamaProc) {
         Write-Skip "Ollama サービスはすでに起動しています。"
         Write-Log "Ollama プロセス確認済み。"
     } else {
-        Start-Process "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop
-        Write-Info "Ollama サービスを起動しました。起動待機中 (5秒)..."
-        Write-Log "ollama serve を起動しました。"
-        Start-Sleep -Seconds 5
+        # フルパスが見つかればそれを使用、なければコマンド名で試みる
+        if ($ollamaExePath) {
+            Start-Process -FilePath $ollamaExePath -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop
+            Write-Log "ollama serve をフルパスで起動しました: $ollamaExePath"
+        } else {
+            Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop
+            Write-Log "ollama serve をコマンド名で起動しました。"
+        }
+        Write-Info "Ollama サービスを起動しました。起動待機中..."
+        Start-Sleep -Seconds 3
         Write-Done "Ollama サービスが起動しました。"
     }
 } catch {
     Write-Err "Ollama サービスの起動に失敗しました: $_"
     Write-Log "Ollama サービス起動エラー: $_"
     Write-Info "後で手動で 'ollama serve' を実行してください。"
+}
+
+# Ollama APIが応答するまで待機（最大60秒）
+$apiReady = $false
+Write-Running "Ollama API の応答を確認しています..."
+for ($i = 0; $i -lt 12; $i++) {
+    try {
+        $response = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 3 -ErrorAction Stop
+        $apiReady = $true
+        Write-Done "Ollama API が応答しています。"
+        Write-Log "Ollama API 応答確認済み。"
+        break
+    } catch {
+        Write-Info "Ollama API を待機中... ($($i+1)/12)"
+        Write-Log "Ollama API 待機中 ($($i+1)/12)。"
+        Start-Sleep -Seconds 5
+    }
+}
+
+if (-not $apiReady) {
+    Write-Host "  [警告] Ollama API が応答しません。モデルのダウンロードをスキップします。" -ForegroundColor Yellow
+    Write-Host "  後で手動で 'ollama pull qwen2.5:7b-instruct' を実行してください。" -ForegroundColor Yellow
+    Write-Log "[警告] Ollama API が応答しません。モデルダウンロードをスキップします。"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -483,32 +582,41 @@ Write-StepHeader "AIモデル (qwen2.5:7b-instruct) のダウンロード"
 
 $modelName = "qwen2.5:7b-instruct"
 
-try {
-    Write-Running "インストール済みモデルを確認しています..."
-    $ollamaList = ollama list 2>&1
-    Write-Log "ollama list: $ollamaList"
+# Ollama APIが応答していない場合はスキップ
+if (-not $apiReady) {
+    Write-Host "  [スキップ] Ollama API が応答していないため、モデルのダウンロードをスキップします。" -ForegroundColor Yellow
+    Write-Host "  Ollama が正常に起動したら、以下のコマンドを手動で実行してください：" -ForegroundColor Yellow
+    Write-Host "    ollama pull $modelName" -ForegroundColor Cyan
+    Write-Log "[スキップ] Ollama API 未応答のためモデルダウンロードをスキップ。"
+    $script:ErrorCount++
+} else {
+    try {
+        Write-Running "インストール済みモデルを確認しています..."
+        $ollamaList = ollama list 2>&1
+        Write-Log "ollama list: $ollamaList"
 
-    if ($ollamaList -match [regex]::Escape($modelName)) {
-        Write-Skip "モデル '$modelName' はすでにダウンロード済みです。"
-    } else {
-        Write-Running "AIモデルをダウンロード中... (約4GB、時間がかかります)"
-        Write-Host "  ※ ダウンロードには数分〜数十分かかる場合があります。" -ForegroundColor Yellow
-        Write-Host "  ※ このウィンドウを閉じないでください。" -ForegroundColor Yellow
-        Write-Log "ollama pull $modelName を実行します。"
-
-        $pullProc = Start-Process -FilePath "ollama" -ArgumentList "pull $modelName" -NoNewWindow -PassThru -Wait
-        if ($pullProc.ExitCode -eq 0) {
-            Write-Done "AIモデルのダウンロードが完了しました。"
-            Write-Log "モデル '$modelName' のダウンロード完了。"
+        if ($ollamaList -match [regex]::Escape($modelName)) {
+            Write-Skip "モデル '$modelName' はすでにダウンロード済みです。"
         } else {
-            throw "ollama pull が終了コード $($pullProc.ExitCode) で終了しました"
+            Write-Running "AIモデルをダウンロード中... (約4GB、時間がかかります)"
+            Write-Host "  ※ ダウンロードには数分〜数十分かかる場合があります。" -ForegroundColor Yellow
+            Write-Host "  ※ このウィンドウを閉じないでください。" -ForegroundColor Yellow
+            Write-Log "ollama pull $modelName を実行します。"
+
+            $pullProc = Start-Process -FilePath "ollama" -ArgumentList "pull $modelName" -NoNewWindow -PassThru -Wait
+            if ($pullProc.ExitCode -eq 0) {
+                Write-Done "AIモデルのダウンロードが完了しました。"
+                Write-Log "モデル '$modelName' のダウンロード完了。"
+            } else {
+                throw "ollama pull が終了コード $($pullProc.ExitCode) で終了しました"
+            }
         }
+    } catch {
+        Write-Err "AIモデルのダウンロードに失敗しました: $_"
+        Write-Log "モデルダウンロードエラー: $_"
+        Write-Info "後で手動で 'ollama pull $modelName' を実行してください。"
+        Confirm-Continue "AIモデルのダウンロードに失敗しました。続行しますか？ (Y/N)"
     }
-} catch {
-    Write-Err "AIモデルのダウンロードに失敗しました: $_"
-    Write-Log "モデルダウンロードエラー: $_"
-    Write-Info "後で手動で 'ollama pull $modelName' を実行してください。"
-    Confirm-Continue "AIモデルのダウンロードに失敗しました。続行しますか？ (Y/N)"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
