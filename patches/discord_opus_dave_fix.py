@@ -233,10 +233,11 @@ def _patched_decode_packet(self, packet):
             _diag_counters["opus_ok"] += 1
         except Exception as exc:
             _diag_counters["opus_fail"] += 1
-            _log.debug(
-                "[DAVE patch decode] Opus decode failed for user %s: %s",
+            _log.info(
+                "[DAVE patch decode] Opus decode FAILED for user %s: %s (type=%s)",
                 user_id,
                 exc,
+                type(exc).__name__,
             )
             # Opusデコード失敗時は無音PCMを返す（エラーを上位に伝播させない）
             # 48kHz stereo 16bit, 20ms = 960 samples * 2ch * 2bytes = 3840 bytes
