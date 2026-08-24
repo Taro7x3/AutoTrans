@@ -651,6 +651,13 @@ worker_task: Optional[asyncio.Task] = None
 # key: guild_id, value: asyncio.Task
 _restart_tasks: dict[int, asyncio.Task] = {}
 
+# ─────────────────────────────────────────────
+# [診断ログ] DAVEエラー再接続試行回数カウンター
+# 無限ループ診断用: 各ギルドの再接続試行回数を記録する
+# key: guild_id, value: 試行回数
+# ─────────────────────────────────────────────
+_reconnect_attempts_diag: dict[int, int] = {}
+
 
 @bot.event
 async def on_ready() -> None:
@@ -867,10 +874,13 @@ async def _restart_recording_for_guild(guild_id: int) -> None:
             logger.info("自動再接続: guild=%s は既に録音中のためスキップ", guild.name)
             return
 
+        diag_attempt = _reconnect_attempts_diag.get(guild_id, 0)
         logger.warning(
-            "自動再接続: guild=%s | channel=%s で start_recording() を再試行します",
+            "自動再接続: guild=%s | channel=%s で start_recording() を再試行します "
+            "| [診断] これまでの累計試行回数=%d",
             guild.name,
             getattr(voice_client.channel, "name", "unknown"),
+            diag_attempt,
         )
 
         # 古いSinkをクリーンアップ
@@ -945,6 +955,18 @@ def finished_callback(error: Exception | None) -> None:
                     continue  # 既に録音中のギルドはスキップ
 
                 guild_id = guild.id
+
+                # [診断ログ] 試行回数をカウントして無限ループを可視化する
+                diag_count = _reconnect_attempts_diag.get(guild_id, 0) + 1
+                _reconnect_attempts_diag[guild_id] = diag_count
+                logger.warning(
+                    "[診断] DAVEエラー再接続試行回数: guild=%s, 試行=%d回目 | "
+                    "_restart_tasks に既存タスクあり=%s (done=%s)",
+                    guild.name,
+                    diag_count,
+                    guild_id in _restart_tasks,
+                    _restart_tasks[guild_id].done() if guild_id in _restart_tasks else "N/A",
+                )
 
                 # 既に再接続タスクが実行中の場合はスキップ（二重起動防止）
                 existing_task = _restart_tasks.get(guild_id)
