@@ -366,14 +366,16 @@ class VADSink(discord.sinks.Sink):
             chunk = vad_buf_concat[:VAD_CHUNK_SAMPLES]
             vad_buf_concat = vad_buf_concat[VAD_CHUNK_SAMPLES:]
 
-            # ── Step 3: Silero VADで発話確率を計算 ──
+            # ── Step 3: Silero VADで発話確率を計算 (CPU/float32 [1, 512] に成形) ──
             try:
-                chunk_tensor = torch.from_numpy(chunk).unsqueeze(0)  # shape: (1, 512)
+                chunk_tensor = torch.from_numpy(chunk).float()
+                if chunk_tensor.ndim == 1:
+                    chunk_tensor = chunk_tensor.unsqueeze(0)  # shape: (1, 512)
                 # VADモデルのデバイス（CPU or CUDA）を検出し、入力テンソルを同じデバイスに移動する。
                 # モデルがCUDAにロードされている場合、CPUテンソルのままだと
                 # RuntimeError: Expected all tensors to be on the same device が発生する。
-                vad_device = next(vad_model.parameters()).device
-                chunk_tensor = chunk_tensor.to(vad_device)
+                # vad_device = next(vad_model.parameters()).device
+                # chunk_tensor = chunk_tensor.to(vad_device)
                 with torch.no_grad():
                     speech_prob = vad_model(chunk_tensor, VAD_SAMPLE_RATE).item()
             except Exception as e:
@@ -1162,7 +1164,7 @@ def initialize_vad_model() -> torch.nn.Module:
     # utilsには (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) が含まれる
     # 今回はモデル本体のみ使用（VADIteratorは使わずモデルを直接呼び出す）
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
 
